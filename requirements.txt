@@ -1,0 +1,17 @@
+fastapi==0.115.0            # framework viết API
+uvicorn[standard]==0.30.6   # server chạy FastAPI
+sqlalchemy==2.0.35          # ORM thao tác với PostgreSQL
+psycopg2-binary==2.9.9      # driver kết nối PostgreSQL
+pgvector==0.3.4             # kiểu dữ liệu Vector cho SQLAlchemy + pgvector
+sentence-transformers==3.1.1  # load model Qwen3-Embedding-0.6B để encode text
+# LƯU Ý: KHÔNG khai báo "torch" ở đây. Torch bản CPU đã được cài riêng ở bước
+# trước trong Dockerfile (RUN pip install torch --index-url .../cpu). Nếu khai
+# báo "torch==2.4.1" ở đây, pip sẽ thấy bản đã cài là "2.4.1+cpu" không khớp
+# tuyệt đối với "2.4.1" và tự tải lại bản CUDA mặc định từ PyPI (nặng ~2GB,
+# kéo theo nvidia-cudnn/cublas...), dễ gây timeout khi mạng chậm.
+pandas==2.2.3                # đọc/convert file Excel, CSV
+openpyxl==3.1.5              # engine đọc file .xlsx cho pandas
+pydantic==2.9.2               # validate dữ liệu request/response
+pydantic-settings==2.5.2      # đọc cấu hình từ file .env
+python-dotenv==1.0.1           # load biến môi trường từ .env
+requests==2.32.3                # gọi HTTP request tới API trong script ingest
