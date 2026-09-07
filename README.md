@@ -3,36 +3,36 @@
 Hệ thống gợi ý **danh sách ứng viên khuyết tật** phù hợp nhất với một yêu cầu
 tuyển dụng, dựa trên vector search bằng pgvector + Qwen3-Embedding-0.6B.
 
-## Kiến trúc DB (3 bảng, có FK)
+## Kiến trúc DB (1 bảng duy nhất)
 
 ```
-disability_groups (nhóm khuyết tật)
-       ▲                    ▲
-       │ FK                 │ FK
-  job_listings          candidates
-  (mô tả công việc)     (danh sách ứng viên)
+candidates (ho_ten, mo_ta, khu_vuc, lien_he, ghi_chu, embedding)
 ```
 
-## Luồng 1 — nạp dữ liệu công việc
+Không có bảng trung gian "nhóm khuyết tật" hay "mô tả công việc" — chỉ có
+ứng viên và mô tả về họ. Mọi thứ nằm gọn trong 1 bảng.
+
+## Luồng 1 — nạp dữ liệu ứng viên
 
 ```
-POST /documents
-  -> ghép field thành "content" (mô tả cv)
-  -> Qwen3-Embedding-0.6B encode -> vector 1024 chiều
-  -> lưu vào job_listings (kèm FK disability_group_id)
+POST /candidates
+  -> Qwen3-Embedding-0.6B encode "mo_ta" -> vector 1024 chiều
+  -> lưu vào candidates (kèm embedding)
 ```
 
 ## Luồng 2 — nhà tuyển dụng tìm ứng viên
 
 ```
 POST /match {"query": "..."}
-  -> dịch/encode query bằng Qwen3-Embedding-0.6B (prompt "query")
-  -> cosine similarity, lấy K job_listings giống nhất
-  -> gom theo disability_group_id, tính điểm trung bình similarity
-  -> chọn nhóm có điểm cao nhất
-  -> query candidates theo disability_group_id đã chọn
-  -> trả về selected_group + group_scores + matched_jobs + candidates
+  -> encode query bằng Qwen3-Embedding-0.6B (prompt "query")
+  -> cosine similarity trực tiếp với embedding của TỪNG ứng viên
+  -> xếp hạng theo similarity, lấy top K
+  -> trả về candidates kèm điểm similarity
 ```
+
+Đây là luồng text -> embedding vector -> query đơn giản nhất: không qua
+bước "chọn nhóm" trung gian, hệ thống so trực tiếp mô tả yêu cầu tuyển dụng
+với mô tả từng ứng viên.
 
 ## Chạy thử
 
@@ -42,12 +42,9 @@ docker compose up -d --build      # dựng db + web
 ```
 
 Nạp dữ liệu mẫu (sau khi convert Excel -> CSV và đặt đúng field trong
-`COLUMN_MAP` của từng script):
+`COLUMN_MAP` của `scripts/ingest_candidates.py`):
 
 ```bash
-python scripts/convert_xlsx_to_csv.py scripts/data/job_listings.xlsx scripts/data/job_listings.csv
-python scripts/ingest_jobs.py
-
 python scripts/convert_xlsx_to_csv.py scripts/data/candidates.xlsx scripts/data/candidates.csv
 python scripts/ingest_candidates.py
 ```
