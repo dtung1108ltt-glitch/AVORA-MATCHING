@@ -72,14 +72,17 @@ Nếu thay model hoặc thay cách tạo embedding, phải xóa vector cũ và i
 ## 2. Cấu trúc project
 
 ```text
-AVORA-MATCHING-main/
+AVORA-MATCHING/
 │
 ├── docker-compose.yml
 ├── Dockerfile
 ├── README.md
-├── requirements.txt
+├── document-tech.md
+├── requirements.txt                # FastAPI + Postgres + embedding (dùng cho Docker)
+├── requirements-dashboard.txt      # Streamlit cho dashboard local (tùy chọn)
+├── dashboard.py                    # Dashboard Streamlit -> localhost:8501
 │
-├── app/
+├── app/                            # API FastAPI -> localhost:8000
 │   ├── config.py
 │   ├── database.py
 │   ├── embeddings.py
@@ -87,6 +90,17 @@ AVORA-MATCHING-main/
 │   ├── models.py
 │   ├── schemas.py
 │   └── __init__.py
+│
+├── src/                            # Engine Gale-Shapley (stdlib thuần)
+│   ├── core/
+│   │   ├── preprocessor.py
+│   │   ├── matching_engine.py
+│   │   └── postprocessor.py
+│   └── evaluation/
+│       ├── metrics.py
+│       └── benchmark.py
+│
+├── tests/                          # pytest / unittest
 │
 └── scripts/
     ├── generate_job_description_database.py
@@ -637,3 +651,344 @@ Embedding query, tìm mô tả gần nhất, tổng hợp nhóm và trả danh s
 - Ngưỡng score cần được hiệu chỉnh bằng bộ test thực tế.
 - Matching theo nhóm không đủ để kết luận một ứng viên cụ thể phù hợp với công việc.
 - Hệ thống chưa kiểm tra kỹ năng, kinh nghiệm, địa điểm, yêu cầu tiếp cận hoặc điều kiện bắt buộc của từng ứng viên.
+
+## 23. Core Matching Engine - Ghép cặp ổn định hai phía (Gale-Shapley)
+
+Phần trên (mục 1-22) mô tả API lọc ứng viên *một chiều* theo nhóm khuyết tật.
+Mục này bổ sung **engine ghép cặp ổn định hai phía** (Two-Sided Stable Matching)
+nằm trong `src/`, giải quyết đúng bản chất bài toán thị trường lao động: cả ứng
+viên và nhà tuyển dụng đều có nguyện vọng riêng.
+
+### 23.1. Vì sao cần matching ổn định?
+
+Cách lọc theo điểm (ranking) hiện tại có thể tạo ra *blocking pair*: một ứng
+viên và một vị trí đều thích nhau hơn lựa chọn hiện tại, nhưng hệ thống không
+ghép họ với nhau. Matching ổn định loại bỏ hoàn toàn tình huống đó.
+
+### 23.2. Pipeline 4 giai đoạn
+
+```text
+GIAI ĐOẠN 1 & 2 - TIỀN XỬ LÝ  (src/core/preprocessor.py)
+─────────────────────────────────────────────────────────────
+ Ma trận E[c][j]  ┐
+ Ma trận C[c][j]  ├─► Chuẩn hóa ─► Hard Constraints ─► Truncated
+ Quota q_j        ┘   (thưa/đặc)   (điểm=0, không      Preference Lists
+                                    khả thi, < sàn)     (L, M)
+        │
+        ▼
+ PreferenceProfile { candidate_preferences, job_preferences, quotas }
+        │
+        ▼
+GIAI ĐOẠN 2 - RANK LOOKUP TABLE  (src/core/matching_engine.py)
+─────────────────────────────────────────────────────────────
+ job_rank[j][c]  ─► O(1)      candidate_rank[c][j] ─► O(1)
+        │
+        ▼
+GIAI ĐOẠN 3 - GALE-SHAPLEY MANY-TO-ONE DEFERRED ACCEPTANCE
+─────────────────────────────────────────────────────────────
+ Candidate-Proposing (mặc định)  ──► kết quả C-optimal
+ Employer-Proposing              ──► kết quả J-optimal
+ Min-Heap mỗi vị trí: đỉnh = ứng viên kém nhất  ─► loại O(log q_j)
+        │
+        ▼
+ MatchingResult { matches, job_assignments, unmatched_* }
+        │
+        ▼
+GIAI ĐOẠN 4 - HẬU XỬ LÝ TOP-K  (src/core/postprocessor.py)
+─────────────────────────────────────────────────────────────
+ Normalized Surplus Score        ──► generate_top_k()
+ Iterative Clearance Rounds      ──► iterative_clearance_rounds()
+        │
+        ▼
+ ĐÁNH GIÁ  (src/evaluation/metrics.py)
+ Blocking pairs = 0%  |  Điểm E, C trung bình  |  Fill rate
+```
+
+### 23.3. Cấu trúc thư mục bổ sung
+
+```text
+AVORA-MATCHING/
+│
+├── conftest.py                       # đưa repo root vào sys.path cho pytest
+│
+├── src/
+│   ├── core/
+│   │   ├── __init__.py               # tái xuất API công khai
+│   │   ├── preprocessor.py           # Giai đoạn 1 & 2
+│   │   ├── matching_engine.py        # Giai đoạn 3 (Gale-Shapley + Rank Table)
+│   │   └── postprocessor.py          # Giai đoạn 4 (Top-K)
+│   └── evaluation/
+│       ├── __init__.py
+│       ├── metrics.py                # blocking pairs, satisfaction, fill rate
+│       └── benchmark.py              # benchmark vs baseline + CLI
+│
+└── tests/
+    ├── __init__.py
+    └── test_matching.py              # 31 test (unittest + pytest)
+```
+
+### 23.4. Cơ sở lý thuyết
+
+| Chủ đề | Nguồn | Áp dụng trong code |
+| --- | --- | --- |
+| Thuật toán Deferred Acceptance (1962) | Gale, D., & Shapley, L. S. *College Admissions and the Stability of Marriage*. American Mathematical Monthly. | `GaleShapleyMatching._solve_candidate_proposing` |
+| Many-to-One / Hospital-Residents | Roth, A. E. (1984). *The Evolution of the Labor Market for Medical Interns*. | `_solve_employer_proposing`, `quotas` |
+| Tính C-optimal / J-optimal | Gale & Shapley (1962); Roth & Sotomayor (1990). | tham số `optimal="candidate"` / `"employer"` |
+| Strategy-proofness phía proposer | Dubins, L. E., & Freedman, D. A. (1981). *Machiavelli and the Gale-Shapley Algorithm*. | lựa chọn candidate-proposing làm mặc định |
+| Rank lookup table | Knuth, D. E. (1997). *Stable Marriage and Its Relation to Other Combinatorial Problems*. | `_build_rank_tables`, `job_rank`, `candidate_rank` |
+| Min-Heap eviction | Cormen et al., *Introduction to Algorithms* (heap) | `heapq.heapreplace`, `held[job]` |
+
+### 23.5. Dữ liệu đầu vào E, C, Quota
+
+Cả hai ma trận đều đánh chỉ số `[candidate][job]` với giá trị > 0:
+
+- `E[c][j]` - **Employer Preference Score**: mức độ phù hợp kỹ năng của ứng viên `c` với vị trí `j`.
+- `C[c][j]` - **Candidate Preference Score**: mức độ yêu thích vị trí `j` của ứng viên `c`.
+- `q_j` - **Quota**: hạn mức tuyển dụng của vị trí `j` (Many-to-One).
+
+Nhận cả ma trận **thưa** (`dict[c][j]`) và **đặc** (`list[list[float]]`):
+
+```python
+from src.core import Preprocessor, PreprocessConfig
+
+profile = Preprocessor(PreprocessConfig(max_candidate_preferences=40)).build_profile(
+    e_scores={0: {0: 0.9, 1: 0.2}},   # E[candidate][job]
+    c_scores={0: {0: 0.4, 1: 0.8}},   # C[candidate][job]
+    quotas={0: 1, 1: 3},              # q_j
+)
+```
+
+### 23.6. Hard Constraints
+
+`apply_hard_constraints` loại vĩnh viễn cặp `(c, j)` nếu:
+
+- `(c, j)` không nằm trong `feasible_pairs` (ví dụ khoảng cách địa lý, mức lương
+  sàn, sai nhóm kỹ năng bắt buộc).
+- `E[c][j] <= 0` hoặc `C[c][j] <= 0`.
+- Điểm dưới ngưỡng `min_e_score` / `min_c_score`.
+
+Cặp bị loại không xuất hiện trong bất kỳ danh sách ưu tiên nào, nên **không bao
+giờ** trở thành blocking pair.
+
+### 23.7. Truncated Preference Lists
+
+Với thị trường lớn, mỗi ứng viên chỉ giữ `L` công việc tốt nhất
+(`PreprocessConfig.max_candidate_preferences`, khuyến nghị 30-50) và tùy chọn
+mỗi vị trí giữ `M` ứng viên tốt nhất (`max_employer_preferences`). Cách này đưa
+độ phức tạp từ `O(N * M)` về `O(N * L)`.
+
+### 23.8. Sử dụng engine
+
+```python
+from src.core import GaleShapleyMatching, Preprocessor, PreprocessConfig
+from src.evaluation.metrics import evaluate
+
+profile = Preprocessor(PreprocessConfig(max_candidate_preferences=40)).build_profile(
+    e_scores=..., c_scores=..., quotas=...
+)
+
+# C-optimal (khuyến nghị): ứng viên chủ động, strategy-proof phía ứng viên.
+result = GaleShapleyMatching(profile, optimal="candidate").solve()
+
+result.matches              # {"c1": "j1", "c2": "j2"}
+result.job_assignments      # {"j1": ["c1"], "j2": ["c2"]}
+result.unmatched_candidates # [...]
+result.unmatched_jobs       # [...]
+result.proposals            # số lời đề nghị (đo chi phí)
+
+# J-optimal: nhà tuyển dụng chủ động.
+j_optimal = GaleShapleyMatching(profile, optimal="employer").solve()
+
+report = evaluate(profile, result)
+assert report.blocking.is_stable          # blocking pair = 0
+print(report.satisfaction.average_e)      # điểm E trung bình
+print(report.satisfaction.average_c)      # điểm C trung bình
+print(report.fill_rate.overall)           # tỷ lệ lấp đầy slot
+```
+
+### 23.9. Top-K đề xuất dự phòng
+
+```python
+from src.core import generate_top_k, iterative_clearance_rounds
+
+# Cách 1: Normalized Surplus Score (nhanh, một lượt).
+recs = generate_top_k(profile, result, k=3)
+# {"c1": [Recommendation(j1, pos=1, primary=True), Recommendation(j3, pos=2), ...]}
+
+# Cách 2: Iterative Clearance Rounds (chạy lại DA nhiều vòng).
+recs = iterative_clearance_rounds(profile, k=3, optimal="candidate")
+```
+
+Với mỗi ứng viên, gợi ý số 1 (nếu đã ghép) là vị trí chính thức
+(`is_primary=True`), các gợi ý sau là phương án dự phòng không trùng lặp.
+
+### 23.10. Độ phức tạp
+
+| Thành phần | Độ phức tạp |
+| --- | --- |
+| Tiền xử lý (lọc + cắt) | `O(N * M)` khi dựng cột, `O(N * L log L)` khi sắp xếp |
+| Rank Lookup Table | `O(N * L)` không gian, tra cứu `O(1)` |
+| Gale-Shapley DA | `O(N * L)` lời đề nghị, mỗi vòng `O(log q_j)` cho heap |
+| Kiểm tra blocking pair | `O(N * L)` |
+| Top-K (surplus) | `O(N * L log L)` |
+| Top-K (clearance) | `O(K * N * L)` |
+
+Trong đó `N` = số ứng viên, `M` = số vị trí, `L` = giới hạn nguyện vọng,
+`q_j` = quota, `K` = số gợi ý.
+
+### 23.11. Chạy test
+
+```bat
+python -m pytest tests -q
+:: hoặc dùng unittest thuần (không cần pytest)
+python -m unittest discover -s tests -v
+```
+
+Bộ test bao phủ: ổn định trên thị trường ngẫu nhiên (cả hai chế độ), C-optimal vs
+J-optimal, Hard Constraints, truncation, thừa cầu/thừa cung, phá hòa tất định,
+quota > 1, Top-K, Iterative Clearance, các chỉ số đánh giá và adapter CSV.
+
+### 23.12. Chạy benchmark và so sánh baseline
+
+```bat
+python -m src.evaluation.benchmark --candidates 2000 --jobs 400 --avg-quota 5 --density 0.4 --seed 0
+python -m src.evaluation.benchmark --candidates 2000 --jobs 400 --json
+```
+
+Kết quả thực đo (Python 3.14, `N=2000` ứng viên, `M=400` vị trí, quota TB=5,
+density=0.4, `L=40`):
+
+| Cấu hình | Cặp ghép | Coverage | Số phép tính | Blocking pairs | Tỷ lệ blocking | Điểm E TB | Điểm C TB | Fill rate | Thời gian (ms) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| GaleShapley (C-optimal) | 1983 | 99.15% | 16448 | 0 | 0.00% | 0.9250 | 0.9531 | 100.00% | 39.35 |
+| GaleShapley (J-optimal) | 1983 | 99.15% | 10097 | 0 | 0.00% | 0.9818 | 0.9050 | 100.00% | 36.53 |
+| Greedy Baseline | 1974 | 98.70% | 80000 | 1521 | 1.90% | 0.9346 | 0.9468 | 99.55% | 146.00 |
+
+**Đọc bảng:**
+
+- **Blocking pairs = 0** ở cả hai chế độ Gale-Shapley: đúng chuẩn ổn định; trong
+  khi baseline tham lam để lại **1521 blocking pair (1.90%)** và bỏ sót 9 cặp ghép.
+- **C-optimal** cho điểm `C` trung bình cao nhất (0.9531) và **J-optimal** cho
+  điểm `E` trung bình cao nhất (0.9818) - minh họa đúng tính đối ngẫu của DA.
+- Số phép tính của Gale-Shapley (10k-16k) **nhỏ hơn ~5-8 lần** baseline (80k) nhờ
+  Rank Table `O(1)` và dừng sớm khi mọi nguyện vọng được xử lý.
+- Baseline nhanh về hằng số nhưng chậm hơn ở quy mô này do phải sắp xếp toàn bộ
+  `N * M = 800.000` cặp, đồng thời chất lượng thấp hơn.
+
+### 23.13. Tích hợp với dữ liệu hiện có (adapter CSV)
+
+Engine độc lập với API. Để chạy thử trên chính dữ liệu của repo:
+
+```python
+from src.core import Preprocessor, PreprocessConfig, load_market_from_csv, GaleShapleyMatching
+from src.evaluation.metrics import evaluate
+
+e_scores, c_scores, quotas, feasible = load_market_from_csv(
+    "scripts/data/candidates.csv",
+    "scripts/data/job_descriptions.csv",
+    default_quota=2,
+)
+
+profile = Preprocessor(PreprocessConfig(max_candidate_preferences=30)).build_profile(
+    e_scores, c_scores, quotas, feasible_pairs=feasible
+)
+result = GaleShapleyMatching(profile, optimal="candidate").solve()
+print(evaluate(profile, result).blocking.count)  # 0
+```
+
+`load_market_from_csv` áp Hard Constraint **trùng nhóm khuyết tật** và sinh điểm
+`E`, `C` mô phỏng tất định để benchmark được ngay. Khi lên production, thay điểm
+mô phỏng bằng:
+
+- `E[c][j]` - điểm tương đồng giữa embedding kỹ năng ứng viên và embedding mô tả
+  công việc (tái sử dụng `app/embeddings.py`).
+- `C[c][j]` - tín hiệu sở thích/mức độ quan tâm của ứng viên với vị trí.
+
+### 23.14. Lưu ý khi tích hợp
+
+- Engine dùng **stdlib thuần** (`heapq`, `collections`, `dataclasses`, `hashlib`),
+  không thêm dependency mới; `numpy` là tùy chọn.
+- Matching sinh ra chỉ là gợi ý xếp hạng, **không thay thế** đánh giá về năng lực,
+  điều kiện tiếp cận và sự phù hợp của từng ứng viên.
+- `optimal="candidate"` được chọn làm mặc định vì bảo vệ ứng viên
+  (strategy-proof), phù hợp định hướng của AVORA.
+- Khi quota hoặc danh sách ưu tiên thay đổi, cần dựng lại `PreferenceProfile`
+  trước khi gọi `solve()`.
+
+## 24. Dashboard Streamlit - giao diện thử nghiệm engine Gale-Shapley
+
+Repo hiện có **hai giao diện web độc lập**, không phụ thuộc nhau:
+
+| Giao diện | Framework | Entrypoint | Cổng | Dùng cho |
+| --- | --- | --- | --- | --- |
+| API matching theo embedding | **FastAPI + Uvicorn** | `app/main.py` | `8000` | Query vector -> nhóm khuyết tật -> danh sách ứng viên |
+| Dashboard engine hai phía | **Streamlit** | `dashboard.py` | `8501` | Ma trận E/C + quota -> matching ổn định + chỉ số |
+
+Dashboard dùng chung package `src/` nhưng **không cần** PostgreSQL, không cần
+`torch`/`sentence-transformers`, không cần Docker.
+
+### 24.1. Cài thư viện
+
+```bash
+pip install -r requirements-dashboard.txt
+
+# Hoặc chỉ cài đúng gói cần thiết:
+pip install streamlit
+```
+
+`streamlit` cố tình **không** khai báo trong `requirements.txt` để image Docker của
+service `web` không phình thêm; xem `requirements-dashboard.txt`.
+
+### 24.2. Khởi chạy và truy cập
+
+```bash
+# Chạy tại thư mục gốc repo (nơi có dashboard.py và thư mục src/)
+streamlit run dashboard.py
+
+# Cố định cổng + cho máy khác trong LAN truy cập
+streamlit run dashboard.py --server.port 8501 --server.address 0.0.0.0
+```
+
+Trình duyệt mở tự động tại **http://localhost:8501**. Nếu cổng 8501 đang bận, đổi
+`--server.port 8502`.
+
+### 24.3. Bốn nguồn dữ liệu trên dashboard
+
+1. **Thị trường mô phỏng** - sinh N ứng viên x M vị trí tất định theo `seed`.
+2. **CSV của repo** - đọc `scripts/data/candidates.csv` + `job_descriptions.csv`
+   qua `load_market_from_csv` (Hard Constraint: trùng nhóm khuyết tật).
+3. **Dán ma trận E/C** - dán trực tiếp hai ma trận:
+
+```text
+,J1,J2,J3
+C1,0.9,0.4,0.2
+C2,0.8,,0.3        <- ô trống = cặp không khả thi
+```
+
+4. **Upload file ma trận** - cùng định dạng trên, dạng `.csv` / `.tsv` / `.txt`;
+   file quota tùy chọn, mỗi dòng `J1, 2` hoặc `J1=2`.
+
+### 24.4. Chức năng
+
+- Chạy Gale-Shapley Many-to-One ở chế độ **C-optimal** hoặc **J-optimal**, tùy chỉnh
+  `L`, `M`, ngưỡng sàn E/C, seed phá hòa, Top-K và trọng số điểm danh dư.
+- Khối chỉ số: **Blocking Pairs** (kèm banner ổn định), **Fill Rate**, Coverage,
+  điểm E/C trung bình, số lời đề nghị và thời gian chạy.
+- Bảng phân bổ ứng viên - công việc (kèm hạng nguyện vọng hai phía lấy từ Rank
+  Lookup Table), tình trạng từng vị trí, Top-K gợi ý dự phòng, danh sách không ghép được.
+- Tải về `matching_assignments.csv`, `job_fill_rate.csv`,
+  `top_k_recommendations.csv` và `matching_report.json`.
+
+### 24.5. Test dashboard
+
+`tests/test_dashboard.py` dùng `streamlit.testing.v1.AppTest` để **chạy thật**
+dashboard: mở trang, bấm nút chạy, rồi khẳng định `Blocking pairs = 0` và các bảng
+kết quả đã render.
+
+```bash
+pytest tests -q          # 38 passed, 2 subtests passed
+```
+
+Nếu môi trường chưa cài `streamlit`, file test này bị **skip** thay vì fail nên bộ
+test của engine không bị ảnh hưởng.
+

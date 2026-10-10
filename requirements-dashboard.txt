@@ -1,0 +1,9 @@
+# Thư viện cho dashboard Streamlit (tùy chọn - KHÔNG cần cho FastAPI/Docker).
+#
+# Cài:  pip install -r requirements-dashboard.txt
+# Chạy: streamlit run dashboard.py   ->  http://localhost:8501
+#
+# `streamlit` cố tình KHÔNG nằm trong requirements.txt để image Docker của
+# service `web` (FastAPI) không phình thêm hàng trăm MB không cần thiết.
+streamlit>=1.30
+pandas>=2.0

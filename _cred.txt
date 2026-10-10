@@ -1,0 +1,7 @@
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+    from pathlib import Path; import os; from streamlit.runtime.credentials import Credentials; print('home=',Path.home()); print('USERPROFILE=',os.environ.get('USERPROFILE')); print('conf=',Credentials.get_conf_file_path()); print('exists=',Credentials.get_conf_file_path().exists()); print('content=',repr(Credentials.get_conf_file_path().read_text() if Credentials.get_conf_file_path().exists() else None))
+                                                                                                                                                                                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: type object 'Credentials' has no attribute 'get_conf_file_path'
+home= C:\Users\dtung
+USERPROFILE= C:\Users\dtung

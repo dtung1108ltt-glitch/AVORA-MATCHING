@@ -1,0 +1,12 @@
+ Volume in drive D is DATA
+ Volume Serial Number is 1ABD-F0F0
+
+ Directory of D:\tung\avora-matching\AVORA-MATCHING
+
+10/02/2026  01:07 AM               246 _streamlit.log
+               1 File(s)            246 bytes
+               0 Dir(s)  66,850,881,536 bytes free
+===PYPROC=== 
+'wmic' is not recognized as an internal or external command,
+operable program or batch file.
+===LISTEN=== 
