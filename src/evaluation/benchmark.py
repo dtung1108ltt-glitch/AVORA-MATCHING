@@ -42,8 +42,10 @@ __all__ = [
     "generate_synthetic_market",
     "run_benchmark",
     "run_profile_benchmark",
+    "to_evaluation_comparison_table",
     "to_markdown_table",
 ]
+
 
 
 def generate_synthetic_market(
@@ -206,6 +208,10 @@ class BenchmarkResult:
     average_c: float
     fill_rate: float
     elapsed_ms: float
+    average_candidate_rank: float = 0.0
+    average_job_rank: float = 0.0
+    unmatched_candidate_rate: float = 0.0
+    congestion_rate: float = 0.0
 
     def as_dict(self) -> dict[str, Any]:
         """Trả về ``dict`` tiện xuất JSON."""
@@ -221,6 +227,10 @@ class BenchmarkResult:
             "average_c": round(self.average_c, 4),
             "fill_rate": round(self.fill_rate, 4),
             "elapsed_ms": round(self.elapsed_ms, 2),
+            "average_candidate_rank": round(self.average_candidate_rank, 2),
+            "average_job_rank": round(self.average_job_rank, 2),
+            "unmatched_candidate_rate": round(self.unmatched_candidate_rate, 4),
+            "congestion_rate": round(self.congestion_rate, 4),
         }
 
 
@@ -244,7 +254,12 @@ def _benchmark_one(
         average_c=report.satisfaction.average_c,
         fill_rate=report.fill_rate.overall,
         elapsed_ms=elapsed_ms,
+        average_candidate_rank=report.ranks.average_candidate_rank,
+        average_job_rank=report.ranks.average_job_rank,
+        unmatched_candidate_rate=report.coverage.unmatched_candidate_rate,
+        congestion_rate=report.conflict.congestion_rate,
     )
+
 
 
 def run_profile_benchmark(
@@ -366,6 +381,50 @@ def to_markdown_table(results: list[BenchmarkResult]) -> str:
         )
 
     return "\n".join(lines)
+
+
+def to_evaluation_comparison_table(results: list[BenchmarkResult]) -> str:
+    """Render bảng so sánh chỉ số đánh giá theo đúng cấu trúc Mục 6.5.
+
+    So sánh trực diện giữa Gale-Shapley (C-optimal / J-optimal) và Baseline sắp xếp theo điểm (Greedy).
+    """
+    header = (
+        "| Chỉ số đánh giá (Mục 6.5) | Ý nghĩa nghiệp vụ | Gale-Shapley (C-optimal) | Gale-Shapley (J-optimal) | Baseline (Sắp xếp theo điểm) |"
+    )
+    separator = (
+        "| --- | --- | --- | --- | --- |"
+    )
+    res_map = {r.name: r for r in results}
+    c_opt = res_map.get("GaleShapley (C-optimal)")
+    j_opt = res_map.get("GaleShapley (J-optimal)")
+    greedy = res_map.get("Greedy Baseline")
+
+    lines = [header, separator]
+    if c_opt and greedy:
+        j_val_e = f"{j_opt.average_e:.4f}" if j_opt else "N/A"
+        j_val_c = f"{j_opt.average_c:.4f}" if j_opt else "N/A"
+        lines.append(
+            f"| Điểm E và C trung bình | Chất lượng ghép hai chiều | E={c_opt.average_e:.4f}, C={c_opt.average_c:.4f} | E={j_val_e}, C={j_val_c} | E={greedy.average_e:.4f}, C={greedy.average_c:.4f} |"
+        )
+        j_rk_c = f"{j_opt.average_candidate_rank:.2f}" if j_opt else "N/A"
+        j_rk_j = f"{j_opt.average_job_rank:.2f}" if j_opt else "N/A"
+        lines.append(
+            f"| Hạng trung bình của đối tác | Mức hài lòng mỗi bên (1 là số 1) | Cand={c_opt.average_candidate_rank:.2f}, Job={c_opt.average_job_rank:.2f} | Cand={j_rk_c}, Job={j_rk_j} | Cand={greedy.average_candidate_rank:.2f}, Job={greedy.average_job_rank:.2f} |"
+        )
+        j_unmatched = f"{j_opt.unmatched_candidate_rate:.2%}" if j_opt else "N/A"
+        lines.append(
+            f"| Tỷ lệ ứng viên chưa được ghép | Độ phủ thị trường | {c_opt.unmatched_candidate_rate:.2%} | {j_unmatched} | {greedy.unmatched_candidate_rate:.2%} |"
+        )
+        j_cong = f"{j_opt.congestion_rate:.2%}" if j_opt else "N/A"
+        lines.append(
+            f"| Tỷ lệ ứng viên bị giới thiệu nhiều nơi | Mức độ xung đột / tắc nghẽn | {c_opt.congestion_rate:.2%} (Độc quyền) | {j_cong} (Độc quyền) | {greedy.congestion_rate:.2%} (Trùng lặp) |"
+        )
+        j_bp = f"{j_opt.blocking_count} ({j_opt.blocking_rate:.2%})" if j_opt else "N/A"
+        lines.append(
+            f"| Blocking Pairs (Bất ổn) | Kiểm chứng tính đúng đắn toán học | {c_opt.blocking_count} ({c_opt.blocking_rate:.2%}) | {j_bp} | {greedy.blocking_count} ({greedy.blocking_rate:.2%}) |"
+        )
+    return "\n".join(lines)
+
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

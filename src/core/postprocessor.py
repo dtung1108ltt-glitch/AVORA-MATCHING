@@ -22,7 +22,7 @@ bắt đầu từ 1.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from src.core.matching_engine import GaleShapleyMatching, MatchingResult
 from src.core.preprocessor import Id, PreferenceProfile
@@ -45,6 +45,8 @@ class Recommendation:
         position: Thứ hạng gợi ý, bắt đầu từ 1.
         score: Điểm danh dư đã chuẩn hóa trong ``[0, 1]``.
         is_primary: ``True`` nếu đây là vị trí ứng viên được ghép chính thức.
+        explanation: Lý do giải thích vì sao ứng viên được gợi ý (Mục 6.1 bước 7).
+        breakdown: Bảng phân rã điểm thành phần.
     """
 
     candidate_id: Id
@@ -52,6 +54,9 @@ class Recommendation:
     position: int
     score: float
     is_primary: bool = False
+    explanation: str = ""
+    breakdown: dict[str, float] = field(default_factory=dict)
+
 
 
 def normalized_surplus_scores(
@@ -159,6 +164,9 @@ def generate_top_k(
         return {candidate: [] for candidate in profile.candidate_ids}
 
     surplus = normalized_surplus_scores(profile, weight_c=weight_c, weight_e=weight_e)
+    meta = profile.metadata if isinstance(profile.metadata, dict) else {}
+    explanations: dict[object, str] = meta.get("explanations", {})
+    breakdowns: dict[object, dict[str, float]] = meta.get("breakdowns", {})
 
     recommendations: dict[Id, list[Recommendation]] = {}
     for candidate in profile.candidate_ids:
@@ -166,6 +174,8 @@ def generate_top_k(
         primary = result.matches.get(candidate)
 
         if include_primary and primary is not None:
+            exp_text = explanations.get((candidate, primary), "")
+            bk_data = breakdowns.get((candidate, primary), {})
             items.append(
                 Recommendation(
                     candidate_id=candidate,
@@ -173,6 +183,8 @@ def generate_top_k(
                     position=1,
                     score=round(surplus.get((candidate, primary), 0.0), 6),
                     is_primary=True,
+                    explanation=exp_text,
+                    breakdown=bk_data,
                 )
             )
 
@@ -188,6 +200,8 @@ def generate_top_k(
         for job in backups:
             if len(items) >= k:
                 break
+            exp_text = explanations.get((candidate, job), "")
+            bk_data = breakdowns.get((candidate, job), {})
             items.append(
                 Recommendation(
                     candidate_id=candidate,
@@ -195,8 +209,11 @@ def generate_top_k(
                     position=len(items) + 1,
                     score=round(surplus.get((candidate, job), 0.0), 6),
                     is_primary=False,
+                    explanation=exp_text,
+                    breakdown=bk_data,
                 )
             )
+
 
         recommendations[candidate] = items[:k]
 

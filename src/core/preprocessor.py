@@ -38,9 +38,19 @@ from __future__ import annotations
 import csv
 import hashlib
 from collections.abc import Hashable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TypeAlias
+from typing import Any, TypeAlias
+
+from src.core.profile_models import CandidateProfile, ExecutionAudit, JobProfile
+from src.core.scoring import (
+    EmployerWeightsConfig,
+    calculate_composite_c_score,
+    calculate_composite_e_score,
+    check_hard_constraints,
+    explain_match,
+)
+
 
 #: Kiểu định danh dùng cho ứng viên và vị trí tuyển dụng.
 Id: TypeAlias = Hashable
@@ -292,6 +302,7 @@ class PreprocessConfig:
     min_c_score: float = 0.0
     require_positive_scores: bool = True
     tie_break_seed: int = 20_240_517
+    use_skill_tie_break: bool = True
 
 
 @dataclass
@@ -309,6 +320,7 @@ class PreferenceProfile:
             và phá hòa tất định.
         job_preferences: ``{j: (c1, c2, ...)}`` đã sắp giảm dần theo ``E``.
         tie_break_seed: Hạt giống phá hòa đã dùng.
+        metadata: Dữ liệu mở rộng hoặc thông tin kiểm toán (ExecutionAudit).
     """
 
     candidate_ids: tuple[Id, ...]
@@ -319,6 +331,8 @@ class PreferenceProfile:
     candidate_preferences: dict[Id, tuple[Id, ...]]
     job_preferences: dict[Id, tuple[Id, ...]]
     tie_break_seed: int = 20_240_517
+    metadata: dict[str, object] = field(default_factory=dict)
+
 
     def total_quota(self) -> int:
         """Tổng hạn mức của toàn bộ vị trí tuyển dụng."""
@@ -380,6 +394,8 @@ class Preprocessor:
         feasible_pairs: set[tuple[Id, Id]] | None = None,
         candidate_ids: Iterable[Id] | None = None,
         job_ids: Iterable[Id] | None = None,
+        skill_scores: Mapping[Id, Mapping[Id, float]] | None = None,
+        metadata: Mapping[str, object] | None = None,
     ) -> PreferenceProfile:
         """Chạy đủ pipeline Giai đoạn 1 và 2.
 
@@ -390,6 +406,8 @@ class Preprocessor:
             feasible_pairs: Tập cặp khả thi (Hard Constraints định sẵn).
             candidate_ids: Nhãn ứng viên khi đầu vào là ma trận đặc.
             job_ids: Nhãn công việc khi đầu vào là ma trận đặc.
+            skill_scores: Điểm tương đồng kỹ năng dùng để phá hòa (Mục 6.4: điểm kỹ năng cao hơn, rồi mã ứng viên).
+            metadata: Thông tin kiểm toán và ngữ cảnh mở rộng.
 
         Returns:
             ``PreferenceProfile`` sẵn sàng cho ``GaleShapleyMatching``.
@@ -479,14 +497,25 @@ class Preprocessor:
                 for candidate in ordered_candidates
                 if job in e_truncated.get(candidate, {})
             ]
-            column.sort(
-                key=lambda item: (
-                    -item[1],
-                    stable_hash("job", item[0], job, seed=seed),
-                    str(item[0]),
+            if skill_scores is not None and self.config.use_skill_tie_break:
+                column.sort(
+                    key=lambda item: (
+                        -item[1],
+                        -float(skill_scores.get(item[0], {}).get(job, 0.0)),
+                        str(item[0]),
+                    )
                 )
-            )
+            else:
+                column.sort(
+                    key=lambda item: (
+                        -item[1],
+                        stable_hash("job", item[0], job, seed=seed),
+                        str(item[0]),
+                    )
+                )
             job_preferences[job] = tuple(candidate for candidate, _ in column)
+
+        meta_dict = dict(metadata) if metadata else {}
 
         return PreferenceProfile(
             candidate_ids=ordered_candidates,
@@ -497,7 +526,88 @@ class Preprocessor:
             candidate_preferences=candidate_preferences,
             job_preferences=job_preferences,
             tie_break_seed=seed,
+            metadata=meta_dict,
         )
+
+    def build_profile_from_profiles(
+        self,
+        candidates: Sequence[CandidateProfile],
+        jobs: Sequence[JobProfile],
+        weights: EmployerWeightsConfig | None = None,
+        *,
+        audit: ExecutionAudit | None = None,
+    ) -> tuple[PreferenceProfile, dict[tuple[Id, Id], str], dict[tuple[Id, Id], dict[str, Any]]]:
+        """Tạo PreferenceProfile trực tiếp từ danh sách CandidateProfile và JobProfile (Mục 6.1).
+
+        Quy trình chuẩn:
+        1. Lọc các ứng viên Direct Track (loại khỏi pool).
+        2. Kiểm tra bộ lọc điều kiện bắt buộc (Hard Constraints) cho từng cặp (c, j).
+        3. Tính điểm E composite (với 6 thành phần) và C composite (với 3 thành phần tự xếp).
+        4. Trích xuất skill scores phục vụ phá hòa (Tie-Breaking Mục 6.4: điểm kỹ năng cao hơn, rồi mã ứng viên).
+        5. Sinh chuỗi giải thích cho từng cặp theo Mục 6.1 bước 7.
+        6. Dựng PreferenceProfile và gắn kèm metadata kiểm toán.
+
+        Returns:
+            tuple[PreferenceProfile, explanations_dict, breakdowns_dict]
+        """
+        e_scores: dict[Id, dict[Id, float]] = {}
+        c_scores: dict[Id, dict[Id, float]] = {}
+        skill_scores: dict[Id, dict[Id, float]] = {}
+        quotas: dict[Id, int] = {job.job_id: max(1, int(job.quota)) for job in jobs}
+        explanations: dict[tuple[Id, Id], str] = {}
+        breakdowns: dict[tuple[Id, Id], dict[str, Any]] = {}
+        rejection_reasons: dict[tuple[Id, Id], str] = {}
+
+        active_candidates = [c for c in candidates if not c.direct_track]
+
+        for cand in active_candidates:
+            c_id = cand.candidate_id
+            e_scores[c_id] = {}
+            c_scores[c_id] = {}
+            skill_scores[c_id] = {}
+
+            for job in jobs:
+                j_id = job.job_id
+                feasible, reason = check_hard_constraints(cand, job)
+                if not feasible:
+                    rejection_reasons[(c_id, j_id)] = reason
+                    continue
+
+                e_score, e_bk = calculate_composite_e_score(cand, job, weights)
+                c_score, c_bk = calculate_composite_c_score(cand, job)
+                exp = explain_match(cand, job, e_score, e_bk, c_score, c_bk)
+
+                e_scores[c_id][j_id] = e_score
+                c_scores[c_id][j_id] = c_score
+                skill_scores[c_id][j_id] = e_bk.get("skill", 0.0)
+
+                explanations[(c_id, j_id)] = exp
+                breakdowns[(c_id, j_id)] = {
+                    "e_score": e_score,
+                    "c_score": c_score,
+                    "e_breakdown": e_bk,
+                    "c_breakdown": c_bk,
+                }
+
+        meta: dict[str, Any] = {
+            "explanations": explanations,
+            "breakdowns": breakdowns,
+            "rejection_reasons": rejection_reasons,
+        }
+        if audit is not None:
+            meta["audit"] = audit
+
+        profile = self.build_profile(
+            e_scores=e_scores,
+            c_scores=c_scores,
+            quotas=quotas,
+            candidate_ids=[c.candidate_id for c in active_candidates],
+            job_ids=[j.job_id for j in jobs],
+            skill_scores=skill_scores,
+            metadata=meta,
+        )
+        return profile, explanations, breakdowns
+
 
     @staticmethod
     def _normalize_quotas(quotas: Mapping[Id, int]) -> dict[Id, int]:
@@ -524,7 +634,24 @@ class Preprocessor:
         return normalized
 
 
+def build_profile_from_profiles(
+    candidates: Sequence[CandidateProfile],
+    jobs: Sequence[JobProfile],
+    weights: EmployerWeightsConfig | None = None,
+    *,
+    config: PreprocessConfig | None = None,
+    audit: ExecutionAudit | None = None,
+) -> PreferenceProfile:
+    """Tạo PreferenceProfile trực tiếp từ danh sách CandidateProfile và JobProfile."""
+    preprocessor = Preprocessor(config or PreprocessConfig(use_skill_tie_break=True))
+    profile, _, _ = preprocessor.build_profile_from_profiles(
+        candidates, jobs, weights, audit=audit
+    )
+    return profile
+
+
 # ---------------------------------------------------------------------------
+
 # Adapter kế thừa dữ liệu CSV hiện có của repo
 # ---------------------------------------------------------------------------
 

@@ -26,19 +26,42 @@ from src.core.preprocessor import (
     PreprocessConfig,
     Preprocessor,
     ScoreMatrix,
+    build_profile_from_profiles,
     load_market_from_csv,
+)
+from src.core.profile_models import (
+    CandidateProfile,
+    ExecutionAudit,
+    JobProfile,
+)
+from src.core.scoring import (
+    EmployerWeightsConfig,
+    calculate_composite_c_score,
+    calculate_composite_e_score,
+    check_hard_constraints,
+    explain_match,
 )
 
 __all__ = [
+    "CandidateProfile",
+    "EmployerWeightsConfig",
+    "ExecutionAudit",
     "GaleShapleyMatching",
     "Id",
+    "JobProfile",
     "MatchingResult",
     "PreferenceProfile",
     "PreprocessConfig",
     "Preprocessor",
     "Recommendation",
     "ScoreMatrix",
+    "build_profile_from_profiles",
+    "calculate_composite_c_score",
+    "calculate_composite_e_score",
+    "check_hard_constraints",
+    "explain_match",
     "generate_top_k",
     "iterative_clearance_rounds",
     "load_market_from_csv",
 ]
+

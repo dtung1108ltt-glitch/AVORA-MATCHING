@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from typing import Any
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 # Tập hợp các nhóm khuyết tật hợp lệ trong hệ thống AVORA
@@ -334,10 +334,23 @@ class CandidateProfileInput(BaseModel):
         Chứa thông tin định danh, sở thích, điểm ưu tiên và vector năng lực Oxyz của ứng viên.
     """
 
-    id: str = Field(description="Định danh duy nhất của ứng viên (ví dụ: 'C1', 'cand_01')")
+    id: str = Field(default="", description="Định danh duy nhất của ứng viên (ví dụ: 'C1', 'cand_01')")
+    candidate_id: str | None = Field(default=None, description="Định danh ứng viên (alias cho id)")
     ho_ten: str | None = Field(default=None, description="Họ và tên của ứng viên")
     nhom_khuyet_tat: str | None = Field(default=None, description="Nhóm khuyết tật của ứng viên")
     vector_oxyz: Vector3D | None = Field(default=None, description="Tọa độ vector năng lực trong không gian Oxyz")
+    skills: list[float] | str | list[str] | None = Field(default=None, description="Kỹ năng chuyên môn (vector, text hoặc list)")
+    essential_access_needs: list[str] | None = Field(default=None, description="Nhu cầu tiếp cận thiết yếu (Hard constraint)")
+    nice_to_have_access_needs: list[str] | None = Field(default=None, description="Nhu cầu tiếp cận nên có (Soft component)")
+    expected_salary_min: float | None = Field(default=None, description="Mức lương tối thiểu mong muốn")
+    expected_salary_max: float | None = Field(default=None, description="Mức lương tối đa mong muốn")
+    work_mode: str | None = Field(default=None, description="Hình thức làm việc ('remote', 'hybrid', 'on-site')")
+    work_hours: str | None = Field(default=None, description="Thời gian làm việc ('full-time', 'part-time', 'flexible')")
+    location: str | None = Field(default=None, description="Khu vực sinh sống / làm việc")
+    priority_ranking: list[str] | None = Field(default=None, description="Thứ tự ưu tiên 3 yếu tố tự xếp (0.5, 0.3, 0.2)")
+    experience_years: float | None = Field(default=None, description="Số năm kinh nghiệm")
+    career_orientation: list[float] | str | None = Field(default=None, description="Mục tiêu / định hướng nghề nghiệp")
+    direct_track: bool = Field(default=False, description="True nếu đã trúng tuyển Direct Track (loại khỏi pool)")
     preferences: list[str] | None = Field(
         default=None,
         description="Danh sách ID công việc được sắp xếp theo thứ tự ưu tiên giảm dần của ứng viên"
@@ -349,6 +362,14 @@ class CandidateProfileInput(BaseModel):
     expected_salary: float | None = Field(default=None, description="Kỳ vọng lương của ứng viên")
     distance_km: float | None = Field(default=None, description="Khoảng cách từ nơi ở tới nơi làm việc (km)")
 
+    @model_validator(mode="before")
+    @classmethod
+    def resolve_identifiers(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if not data.get("id") and data.get("candidate_id"):
+                data["id"] = data["candidate_id"]
+        return data
+
 
 class JobProfileInput(BaseModel):
     """
@@ -358,10 +379,28 @@ class JobProfileInput(BaseModel):
         Chứa thông tin vị trí, hạn mức tuyển dụng (Quota), danh sách ưu tiên, và vector yêu cầu Oxyz.
     """
 
-    id: str = Field(description="Định danh duy nhất của vị trí việc làm (ví dụ: 'J1', 'job_dev')")
+    id: str = Field(default="", description="Định danh duy nhất của vị trí việc làm (ví dụ: 'J1', 'job_dev')")
+    job_id: str | None = Field(default=None, description="Định danh vị trí (alias cho id)")
     title: str | None = Field(default=None, description="Tên hoặc chức danh công việc")
     quota: int = Field(default=1, ge=1, description="Hạn mức tuyển dụng q_j: số lượng chỉ tiêu tối đa cho vị trí (Many-to-One)")
     vector_oxyz: Vector3D | None = Field(default=None, description="Tọa độ vector yêu cầu tuyển dụng trong không gian Oxyz")
+    skills_required: list[float] | str | list[str] | None = Field(default=None, description="Kỹ năng yêu cầu")
+    access_support_provided: list[str] | None = Field(default=None, description="Các điều kiện hỗ trợ tiếp cận cung cấp")
+    salary_min: float | None = Field(default=None, description="Mức lương tối thiểu")
+    salary_max: float | None = Field(default=None, description="Mức lương tối đa")
+    work_mode: str | None = Field(default=None, description="Hình thức làm việc ('remote', 'hybrid', 'on-site')")
+    work_hours: str | None = Field(default=None, description="Thời gian làm việc ('full-time', 'part-time', 'flexible')")
+    location: str | None = Field(default=None, description="Khu vực làm việc")
+    experience_required_years: float | None = Field(default=None, description="Số năm kinh nghiệm yêu cầu")
+    career_domain: list[float] | str | None = Field(default=None, description="Lĩnh vực ngành nghề của vị trí")
+
+    @model_validator(mode="before")
+    @classmethod
+    def resolve_identifiers(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if not data.get("id") and data.get("job_id"):
+                data["id"] = data["job_id"]
+        return data
     preferences: list[str] | None = Field(
         default=None,
         description="Danh sách ID ứng viên được sắp xếp theo thứ tự ưu tiên giảm dần của nhà tuyển dụng"
@@ -373,6 +412,7 @@ class JobProfileInput(BaseModel):
     min_e_score: float = Field(default=0.0, ge=0.0, description="Ngưỡng sàn điểm E tối thiểu để chấp nhận ứng viên")
     salary_offered: float | None = Field(default=None, description="Mức lương chi trả cho vị trí")
     allowed_disability_groups: list[str] | None = Field(default=None, description="Các nhóm khuyết tật phù hợp với công việc")
+
 
 
 class StableMatchingRequest(BaseModel):
@@ -474,6 +514,9 @@ class CandidateRecommendationResponse(BaseModel):
     position: int = Field(description="Thứ hạng gợi ý (1 là ưu tiên cao nhất)")
     score: float = Field(description="Điểm phù hợp / thặng dư danh dư (Normalized Surplus Score)")
     is_primary: bool = Field(default=False, description="True nếu đây là cặp ghép cặp chính thức từ Gale-Shapley")
+    explanation: str | None = Field(default=None, description="Lý do giải thích vì sao ứng viên được gợi ý (Mục 6.1 bước 7)")
+    e_breakdown: dict[str, float] | None = Field(default=None, description="Bảng phân rã điểm thành phần phía NTD")
+    c_breakdown: dict[str, float] | None = Field(default=None, description="Bảng phân rã điểm thành phần phía ứng viên")
 
 
 class MatchedPairResponse(BaseModel):
@@ -490,6 +533,9 @@ class MatchedPairResponse(BaseModel):
     e_score: float | None = Field(default=None, description="Điểm E (mức độ phù hợp kỹ năng từ phía NTD)")
     candidate_rank: int | None = Field(default=None, description="Thứ bậc của job trong danh sách ưu tiên của ứng viên (1 là số 1)")
     job_rank: int | None = Field(default=None, description="Thứ bậc của ứng viên trong danh sách ưu tiên của job (1 là số 1)")
+    explanation: str | None = Field(default=None, description="Lý do giải thích vì sao ứng viên được gợi ý (Mục 6.1 bước 7)")
+    e_breakdown: dict[str, float] | None = Field(default=None, description="Phân rã điểm thành phần E")
+    c_breakdown: dict[str, float] | None = Field(default=None, description="Phân rã điểm thành phần C")
 
 
 class StableMatchingMetricsResponse(BaseModel):
@@ -513,6 +559,11 @@ class StableMatchingMetricsResponse(BaseModel):
     employer_satisfaction_avg: float = Field(description="Mức độ hài lòng trung bình phía nhà tuyển dụng (thang điểm 0 - 1)")
     fill_rate: float = Field(description="Tỷ lệ lấp đầy vị trí tuyển dụng (tổng tuyển / tổng quota)")
     proposals_count: int = Field(description="Tổng số lượt đề xuất phát sinh trong quá trình chạy thuật toán")
+    average_candidate_rank: float | None = Field(default=None, description="Hạng trung bình của công việc trong danh sách ưu tiên ứng viên (Mục 6.5)")
+    average_job_rank: float | None = Field(default=None, description="Hạng trung bình của ứng viên trong danh sách ưu tiên NTD (Mục 6.5)")
+    unmatched_candidate_rate: float | None = Field(default=None, description="Tỷ lệ ứng viên chưa được ghép (Mục 6.5)")
+    congestion_rate: float | None = Field(default=None, description="Mức độ xung đột giới thiệu nhiều nơi (Mục 6.5)")
+
 
 
 class StableMatchingResponse(BaseModel):

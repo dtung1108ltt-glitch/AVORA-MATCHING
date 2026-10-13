@@ -36,6 +36,15 @@ from app.schemas import (
     StableMatchingResponse,
     Vector3D,
 )
+from src.core.profile_models import CandidateProfile, ExecutionAudit, JobProfile
+from src.core.scoring import (
+    EmployerWeightsConfig,
+    calculate_composite_c_score,
+    calculate_composite_e_score,
+    check_hard_constraints,
+    explain_match,
+)
+
 
 
 # ===========================================================================
@@ -233,15 +242,17 @@ def build_preference_lists(
     max_c_prefs: int | None = None,
     max_e_prefs: int | None = None,
     seed: int = 20240517,
+    skill_scores: dict[str, dict[str, float]] | None = None,
 ) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
     """
     Chuyển đổi ma trận điểm C và E thành Danh sách Ưu tiên tuyến tính (Preference Lists)
-    kèm cơ chế cắt ngắn (Truncated Preference Lists) và phá hòa tất định.
+    kèm cơ chế cắt ngắn (Truncated Preference Lists) và phá hòa tất định theo Mục 6.4.
 
     Mục đích:
         Sắp xếp các công việc theo thứ tự điểm C giảm dần cho từng ứng viên,
         và sắp xếp các ứng viên theo thứ tự điểm E giảm dần cho từng nhà tuyển dụng/công việc.
-        Áp dụng Deterministic Tie-Breaking để giải quyết các trường hợp bằng điểm.
+        Áp dụng Deterministic Tie-Breaking (Mục 6.4: điểm kỹ năng cao hơn, rồi mã ứng viên)
+        để giải quyết các trường hợp bằng điểm E.
 
     Tham số đầu vào:
         candidate_scores (dict[str, dict[str, float]]): Điểm C theo cấu trúc {candidate_id: {job_id: score}}.
@@ -249,6 +260,7 @@ def build_preference_lists(
         max_c_prefs (int | None, mặc định None): Giới hạn L nguyện vọng tối đa của ứng viên (Truncation).
         max_e_prefs (int | None, mặc định None): Giới hạn M ứng viên tối đa của công việc (Truncation).
         seed (int, mặc định 20240517): Hạt giống phá hòa tất định.
+        skill_scores (dict[str, dict[str, float]] | None): Điểm kỹ năng để phá hòa theo Mục 6.4.
 
     Kết quả trả về:
         tuple[dict[str, list[str]], dict[str, list[str]]]:
@@ -286,14 +298,25 @@ def build_preference_lists(
         # Lọc các ứng viên có điểm E hợp lệ (> 0)
         valid_items = [(c_id, score) for c_id, score in cands_dict.items() if score > 0.0]
 
-        # Sắp xếp theo: 1) Điểm E giảm dần (-score), 2) Hàm băm phá hòa tất định, 3) ID ứng viên
-        valid_items.sort(
-            key=lambda item: (
-                -item[1],
-                deterministic_tie_breaker(seed, "job_pref", j_id, item[0]),
-                str(item[0]),
+        # Sắp xếp theo Mục 6.4:
+        # Nếu có skill_scores: ưu tiên điểm E giảm dần, rồi điểm kỹ năng cao hơn, rồi mã ứng viên
+        if skill_scores is not None:
+            valid_items.sort(
+                key=lambda item: (
+                    -item[1],
+                    -float(skill_scores.get(item[0], {}).get(j_id, 0.0)),
+                    str(item[0]),
+                )
             )
-        )
+        else:
+            # Fallback hàm băm tất định
+            valid_items.sort(
+                key=lambda item: (
+                    -item[1],
+                    deterministic_tie_breaker(seed, "job_pref", j_id, item[0]),
+                    str(item[0]),
+                )
+            )
 
         # Lấy danh sách ID các ứng viên sau khi sắp xếp
         sorted_cand_ids = [c_id for c_id, _ in valid_items]
@@ -303,6 +326,7 @@ def build_preference_lists(
             sorted_cand_ids = sorted_cand_ids[:max_e_prefs]
 
         jobs_pref[j_id] = sorted_cand_ids
+
 
     return candidates_pref, jobs_pref
 
@@ -820,6 +844,22 @@ def calculate_matching_metrics(
     # Tính Tỷ lệ lấp đầy vị trí tuyển dụng (Fill Rate)
     fill_rate = round(matched_pairs_count / total_quota, 4) if total_quota > 0 else 0.0
 
+    # Tính thứ bậc trung bình hai phía và tỷ lệ chưa ghép theo Mục 6.5
+    cand_rank_list: list[int] = []
+    job_rank_list: list[int] = []
+    for c_id, j_id in matches.items():
+        c_p = candidates_pref.get(c_id, [])
+        if j_id in c_p:
+            cand_rank_list.append(c_p.index(j_id) + 1)
+        j_p = jobs_pref.get(j_id, [])
+        if c_id in j_p:
+            job_rank_list.append(j_p.index(c_id) + 1)
+
+    avg_c_rank = round(sum(cand_rank_list) / len(cand_rank_list), 2) if cand_rank_list else 0.0
+    avg_j_rank = round(sum(job_rank_list) / len(job_rank_list), 2) if job_rank_list else 0.0
+    unmatched_cand_rate = round(unmatched_candidates_count / total_candidates, 4) if total_candidates > 0 else 0.0
+    congestion_rate = 0.0  # Gale-Shapley đảm bảo độc quyền, 0% trùng lặp
+
     return StableMatchingMetricsResponse(
         total_candidates=total_candidates,
         total_jobs=total_jobs,
@@ -834,7 +874,12 @@ def calculate_matching_metrics(
         employer_satisfaction_avg=avg_e_sat,
         fill_rate=fill_rate,
         proposals_count=proposals_count,
+        average_candidate_rank=avg_c_rank,
+        average_job_rank=avg_j_rank,
+        unmatched_candidate_rate=unmatched_cand_rate,
+        congestion_rate=congestion_rate,
     )
+
 
 
 # ===========================================================================
@@ -870,6 +915,12 @@ def run_stable_matching(request: StableMatchingRequest) -> StableMatchingRespons
     raw_e_matrix: dict[str, dict[str, float]] = {c_id: {} for c_id in candidate_ids}
     raw_c_matrix: dict[str, dict[str, float]] = {c_id: {} for c_id in candidate_ids}
 
+    # Lưu trữ thông tin phân rã điểm và giải thích (Mục 6.1 bước 7)
+    explanations_map: dict[tuple[str, str], str] = {}
+    e_breakdown_map: dict[tuple[str, str], dict[str, float]] = {}
+    c_breakdown_map: dict[tuple[str, str], dict[str, float]] = {}
+    skill_scores_map: dict[str, dict[str, float]] = {c_id: {} for c_id in candidate_ids}
+
     # Map tra cứu nhanh ứng viên và công việc
     cand_map = {c.id: c for c in request.candidates}
     job_map = {j.id: j for j in request.jobs}
@@ -879,29 +930,83 @@ def run_stable_matching(request: StableMatchingRequest) -> StableMatchingRespons
         for j in request.jobs:
             j_id = j.id
 
-            # 1. Xác định Điểm E (Employer Preference Score)
-            e_val = 0.0
-            if c.vector_oxyz and j.vector_oxyz:
+            has_composite = (
+                c.skills is not None
+                or c.essential_access_needs is not None
+                or c.nice_to_have_access_needs is not None
+                or c.priority_ranking is not None
+                or j.skills_required is not None
+                or j.access_support_provided is not None
+            )
+
+            if has_composite:
+                cand_prof = CandidateProfile(
+                    candidate_id=c.id,
+                    skills=c.skills or [],
+                    essential_access_needs=c.essential_access_needs or [],
+                    nice_to_have_access_needs=c.nice_to_have_access_needs or [],
+                    expected_salary_min=c.expected_salary_min or (c.expected_salary or 0.0),
+                    expected_salary_max=c.expected_salary_max or (c.expected_salary or 0.0),
+                    work_mode=c.work_mode or "on-site",
+                    work_hours=c.work_hours or "full-time",
+                    location=c.location or "",
+                    priority_ranking=c.priority_ranking or ["income", "distance_or_remote", "career_path"],
+                    experience_years=c.experience_years or 0.0,
+                    career_orientation=c.career_orientation or "",
+                    disability_group=c.nhom_khuyet_tat,
+                    direct_track=c.direct_track,
+                )
+                job_prof = JobProfile(
+                    job_id=j.id,
+                    title=j.title or "",
+                    quota=j.quota,
+                    skills_required=j.skills_required or [],
+                    access_support_provided=j.access_support_provided or [],
+                    salary_min=j.salary_min or (j.salary_offered or 0.0),
+                    salary_max=j.salary_max or (j.salary_offered or 0.0),
+                    work_mode=j.work_mode or "on-site",
+                    work_hours=j.work_hours or "full-time",
+                    location=j.location or "",
+                    experience_required_years=j.experience_required_years or 0.0,
+                    career_domain=j.career_domain or "",
+                )
+                feasible, reason = check_hard_constraints(cand_prof, job_prof)
+                if not feasible:
+                    e_val = 0.0
+                    c_val = 0.0
+                else:
+                    e_val, e_bk = calculate_composite_e_score(cand_prof, job_prof)
+                    c_val, c_bk = calculate_composite_c_score(cand_prof, job_prof)
+                    exp = explain_match(cand_prof, job_prof, e_val, e_bk, c_val, c_bk)
+                    explanations_map[(c_id, j_id)] = exp
+                    e_breakdown_map[(c_id, j_id)] = e_bk
+                    c_breakdown_map[(c_id, j_id)] = c_bk
+                    skill_scores_map[c_id][j_id] = e_bk.get("skill", 0.0)
+            elif c.vector_oxyz and j.vector_oxyz:
                 # Tính Cosine Similarity từ tọa độ Không gian Vector Oxyz: u=(x1, y1, z1) và v=(x2, y2, z2)
                 e_val = calculate_cosine_similarity_3d(
                     c.vector_oxyz.to_tuple(),
                     j.vector_oxyz.to_tuple(),
                 )
+                if c.c_scores and j_id in c.c_scores:
+                    c_val = float(c.c_scores[j_id])
+                elif c.preferences and j_id in c.preferences:
+                    rank = c.preferences.index(j_id)
+                    c_val = max(0.1, 1.0 - (rank * 0.1))
+                else:
+                    c_val = 0.5
             elif j.e_scores and c_id in j.e_scores:
                 e_val = float(j.e_scores[c_id])
+                if c.c_scores and j_id in c.c_scores:
+                    c_val = float(c.c_scores[j_id])
+                elif c.preferences and j_id in c.preferences:
+                    rank = c.preferences.index(j_id)
+                    c_val = max(0.1, 1.0 - (rank * 0.1))
+                else:
+                    c_val = 0.5
             else:
                 # Mặc định trung tính nếu không có thông tin
                 e_val = 0.5
-
-            # 2. Xác định Điểm C (Candidate Preference Score)
-            c_val = 0.0
-            if c.c_scores and j_id in c.c_scores:
-                c_val = float(c.c_scores[j_id])
-            elif c.preferences and j_id in c.preferences:
-                # Nếu cung cấp preference list thay vì điểm, nội suy điểm giảm dần theo thứ bậc
-                rank = c.preferences.index(j_id)
-                c_val = max(0.1, 1.0 - (rank * 0.1))
-            else:
                 c_val = 0.5
 
             raw_e_matrix[c_id][j_id] = e_val
@@ -931,6 +1036,7 @@ def run_stable_matching(request: StableMatchingRequest) -> StableMatchingRespons
         candidate_scores=filtered_c,
         employer_scores=job_e_matrix,
         seed=request.tie_break_seed,
+        skill_scores=skill_scores_map if any(skill_scores_map.values()) else None,
     )
 
     # -----------------------------------------------------------------------
@@ -972,6 +1078,9 @@ def run_stable_matching(request: StableMatchingRequest) -> StableMatchingRespons
                 position=int(r["position"]),
                 score=float(r["score"]),
                 is_primary=bool(r["is_primary"]),
+                explanation=explanations_map.get((str(r["candidate_id"]), str(r["job_id"]))),
+                e_breakdown=e_breakdown_map.get((str(r["candidate_id"]), str(r["job_id"]))),
+                c_breakdown=c_breakdown_map.get((str(r["candidate_id"]), str(r["job_id"]))),
             )
             for r in rec_list
         ]
@@ -1005,8 +1114,12 @@ def run_stable_matching(request: StableMatchingRequest) -> StableMatchingRespons
                 e_score=round(filtered_e.get(c_id, {}).get(j_id, 0.0), 4),
                 candidate_rank=(cand_rank_table[c_id].get(j_id, -1) + 1) if c_id in cand_rank_table else None,
                 job_rank=(job_rank_table[j_id].get(c_id, -1) + 1) if j_id in job_rank_table else None,
+                explanation=explanations_map.get((c_id, j_id)),
+                e_breakdown=e_breakdown_map.get((c_id, j_id)),
+                c_breakdown=c_breakdown_map.get((c_id, j_id)),
             )
         )
+
 
     unmatched_candidates = [c_id for c_id in candidate_ids if c_id not in matches]
     unmatched_jobs = [j_id for j_id in job_ids if len(job_assignments.get(j_id, [])) < quotas.get(j_id, 0)]

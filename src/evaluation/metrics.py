@@ -19,6 +19,8 @@ Ba chỉ số cốt lõi:
 
 from __future__ import annotations
 
+import math
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -27,15 +29,27 @@ from src.core.preprocessor import Id, PreferenceProfile
 
 __all__ = [
     "BlockingPairReport",
+    "ConflictReport",
+    "CoverageReport",
     "EvaluationReport",
+    "FairnessAuditReport",
     "FillRateReport",
+    "RankReport",
     "SatisfactionReport",
+    "audit_fairness",
+    "average_ranks",
     "average_satisfaction",
     "calculate_blocking_pairs",
+    "calculate_ndcg_at_k",
+    "calculate_precision_at_k",
+    "calculate_vector_recall",
+    "conflict_metrics",
+    "coverage_metrics",
     "evaluate",
     "fill_rate",
     "find_blocking_pairs",
 ]
+
 
 
 @dataclass
@@ -94,17 +108,87 @@ class FillRateReport:
 
 
 @dataclass
+class RankReport:
+    """Hạng trung bình của đối tác trong danh sách ưu tiên theo Mục 6.5.
+
+    Attributes:
+        average_candidate_rank: Hạng trung bình của công việc trong mắt ứng viên (1 là số 1).
+        average_job_rank: Hạng trung bình của ứng viên trong mắt nhà tuyển dụng (1 là số 1).
+        matched_pairs: Số cặp đã ghép.
+    """
+
+    average_candidate_rank: float = 0.0
+    average_job_rank: float = 0.0
+    matched_pairs: int = 0
+
+
+@dataclass
+class CoverageReport:
+    """Độ phủ thị trường và tỷ lệ chưa được ghép theo Mục 6.5.
+
+    Attributes:
+        unmatched_candidate_count: Số ứng viên chưa được ghép.
+        unmatched_candidate_rate: Tỷ lệ ứng viên chưa được ghép (unmatched / total).
+        unmatched_job_count: Số vị trí việc làm chưa tuyển đủ chỉ tiêu.
+        unmatched_job_rate: Tỷ lệ vị trí chưa tuyển đủ chỉ tiêu.
+        total_candidates: Tổng số ứng viên.
+        total_jobs: Tổng số vị trí tuyển dụng.
+    """
+
+    unmatched_candidate_count: int = 0
+    unmatched_candidate_rate: float = 0.0
+    unmatched_job_count: int = 0
+    unmatched_job_rate: float = 0.0
+    total_candidates: int = 0
+    total_jobs: int = 0
+
+
+@dataclass
+class ConflictReport:
+    """Đo lường mức độ xung đột và tắc nghẽn (Congestion Rate) theo Mục 6.5.
+
+    Attributes:
+        multi_assigned_candidates: Số ứng viên bị phân bổ / giới thiệu cho > 1 nơi.
+        congestion_rate: Tỷ lệ xung đột (multi_assigned / total_matched).
+        max_assignments_per_candidate: Số lượng vị trí tối đa mà 1 ứng viên bị gán.
+    """
+
+    multi_assigned_candidates: int = 0
+    congestion_rate: float = 0.0
+    max_assignments_per_candidate: int = 1
+
+
+@dataclass
+class FairnessAuditReport:
+    """Báo cáo kiểm toán công bằng và tỷ lệ ghép giữa các nhóm theo Mục 6.6.
+
+    Attributes:
+        group_match_rates: Tỷ lệ trúng tuyển theo từng nhóm (nhóm khuyết tật).
+        disparate_impact_ratio: Tỷ số giữa nhóm thấp nhất và nhóm cao nhất (Four-Fifths Rule).
+        is_fair: True nếu disparate_impact_ratio >= 0.80.
+    """
+
+    group_match_rates: dict[str, float] = field(default_factory=dict)
+    disparate_impact_ratio: float = 1.0
+    is_fair: bool = True
+
+
+@dataclass
 class EvaluationReport:
     """Gói toàn bộ chỉ số đánh giá cho một matching."""
 
     blocking: BlockingPairReport = field(default_factory=BlockingPairReport)
     satisfaction: SatisfactionReport = field(default_factory=SatisfactionReport)
     fill_rate: FillRateReport = field(default_factory=FillRateReport)
+    ranks: RankReport = field(default_factory=RankReport)
+    coverage: CoverageReport = field(default_factory=CoverageReport)
+    conflict: ConflictReport = field(default_factory=ConflictReport)
 
     def as_dict(self) -> dict[str, Any]:
         """Chuyển báo cáo thành ``dict`` lồng nhau (tiện xuất JSON/CSV)."""
 
         return asdict(self)
+
 
 
 def find_blocking_pairs(
@@ -278,6 +362,187 @@ def fill_rate(
     )
 
 
+def average_ranks(
+    profile: PreferenceProfile,
+    result: MatchingResult,
+) -> RankReport:
+    """Tính thứ hạng trung bình của đối tác trong danh sách ưu tiên theo Mục 6.5.
+
+    Hạng bắt đầu từ 1 (1 là lựa chọn tốt nhất).
+    """
+    cand_ranks: list[int] = []
+    job_ranks: list[int] = []
+
+    for cand, job in result.matches.items():
+        c_prefs = profile.candidate_preferences.get(cand, ())
+        if job in c_prefs:
+            cand_ranks.append(c_prefs.index(job) + 1)
+
+        j_prefs = profile.job_preferences.get(job, ())
+        if cand in j_prefs:
+            job_ranks.append(j_prefs.index(cand) + 1)
+
+    matched = len(result.matches)
+    return RankReport(
+        average_candidate_rank=(sum(cand_ranks) / len(cand_ranks)) if cand_ranks else 0.0,
+        average_job_rank=(sum(job_ranks) / len(job_ranks)) if job_ranks else 0.0,
+        matched_pairs=matched,
+    )
+
+
+def coverage_metrics(
+    profile: PreferenceProfile,
+    result: MatchingResult,
+) -> CoverageReport:
+    """Tính tỷ lệ ứng viên và việc làm chưa được ghép theo Mục 6.5."""
+    total_c = len(profile.candidate_ids)
+    matched_c = len(result.matches)
+    unmatched_c = total_c - matched_c
+
+    total_j = len(profile.job_ids)
+    unfilled_j = 0
+    for j in profile.job_ids:
+        q = profile.quotas.get(j, 0)
+        filled = len(result.job_assignments.get(j, []))
+        if filled < q:
+            unfilled_j += 1
+
+    return CoverageReport(
+        unmatched_candidate_count=unmatched_c,
+        unmatched_candidate_rate=(unmatched_c / total_c) if total_c else 0.0,
+        unmatched_job_count=unfilled_j,
+        unmatched_job_rate=(unfilled_j / total_j) if total_j else 0.0,
+        total_candidates=total_c,
+        total_jobs=total_j,
+    )
+
+
+def conflict_metrics(
+    job_assignments: MatchingResult | Mapping[Id, Sequence[Id]],
+    total_candidates: int = 0,
+) -> ConflictReport:
+    """Đo lường mức độ xung đột / tắc nghẽn (Congestion Rate) theo Mục 6.5.
+
+    Trong Gale-Shapley, mỗi ứng viên chỉ được nhận tối đa 1 việc (congestion = 0%).
+    Trong Baseline sắp xếp tham lam hoặc gợi ý không điều phối, ứng viên giỏi bị
+    giới thiệu đồng thời cho nhiều nơi, dẫn đến xung đột tuyển dụng.
+    """
+    assignments = (
+        job_assignments.job_assignments
+        if isinstance(job_assignments, MatchingResult)
+        else job_assignments
+    )
+    counts: dict[Id, int] = {}
+    for job, cands in assignments.items():
+        for c in cands:
+            counts[c] = counts.get(c, 0) + 1
+
+    multi_assigned = sum(1 for c, cnt in counts.items() if cnt > 1)
+    total_placed = len(counts)
+    rate = (multi_assigned / total_placed) if total_placed else 0.0
+    max_c = max(counts.values()) if counts else (1 if total_placed else 0)
+
+    return ConflictReport(
+        multi_assigned_candidates=multi_assigned,
+        congestion_rate=rate,
+        max_assignments_per_candidate=max_c,
+    )
+
+
+def calculate_vector_recall(
+    approximate_ids: Sequence[Id],
+    exact_ids: Sequence[Id],
+    top_n: int = 50,
+) -> float:
+    """Đo Recall Top-N của pgvector ANN so với tìm kiếm vét cạn (brute-force) theo Mục 6.5."""
+    if top_n <= 0:
+        return 0.0
+    approx_set = set(approximate_ids[:top_n])
+    exact_set = set(exact_ids[:top_n])
+    if not exact_set:
+        return 1.0
+    return len(approx_set & exact_set) / len(exact_set)
+
+
+def calculate_precision_at_k(
+    recommended_ids: Sequence[Id],
+    relevant_ids: set[Id],
+    k: int = 5,
+) -> float:
+    """Tính Precision@K cho danh sách gợi ý theo Mục 6.5."""
+    if k <= 0:
+        return 0.0
+    top_k = recommended_ids[:k]
+    if not top_k:
+        return 0.0
+    hits = sum(1 for item in top_k if item in relevant_ids)
+    return hits / len(top_k)
+
+
+def calculate_ndcg_at_k(
+    recommended_ids: Sequence[Id],
+    relevance_scores: Mapping[Id, float],
+    k: int = 5,
+) -> float:
+    """Tính Normalized Discounted Cumulative Gain (nDCG@K) theo Mục 6.5."""
+    if k <= 0:
+        return 0.0
+    top_k = recommended_ids[:k]
+    if not top_k:
+        return 0.0
+
+    dcg = 0.0
+    for idx, item in enumerate(top_k):
+        rel = float(relevance_scores.get(item, 0.0))
+        dcg += (math.pow(2.0, rel) - 1.0) / math.log2(idx + 2.0)
+
+    sorted_ideal = sorted(relevance_scores.values(), reverse=True)[:k]
+    idcg = 0.0
+    for idx, rel in enumerate(sorted_ideal):
+        idcg += (math.pow(2.0, float(rel)) - 1.0) / math.log2(idx + 2.0)
+
+    if idcg <= 0.0:
+        return 1.0 if dcg <= 0.0 else 0.0
+    return dcg / idcg
+
+
+def audit_fairness(
+    result: MatchingResult | Mapping[Id, Id],
+    candidate_groups: Mapping[Id, str],
+) -> FairnessAuditReport:
+    """Kiểm toán công bằng giữa các nhóm ứng viên theo Mục 6.6.
+
+    Đảm bảo không thiên kiến, tính Disparate Impact ratio dựa trên tỷ lệ trúng tuyển.
+    """
+    matches = result.matches if isinstance(result, MatchingResult) else result
+    groups_total: dict[str, int] = {}
+    groups_matched: dict[str, int] = {}
+
+    for cand, group in candidate_groups.items():
+        groups_total[group] = groups_total.get(group, 0) + 1
+        if cand in matches:
+            groups_matched[group] = groups_matched.get(group, 0) + 1
+
+    rates: dict[str, float] = {}
+    for group, total in groups_total.items():
+        matched = groups_matched.get(group, 0)
+        rates[group] = (matched / total) if total else 0.0
+
+    if not rates or min(rates.values()) == 0.0:
+        di_ratio = 0.0 if (rates and max(rates.values()) > 0.0) else 1.0
+    else:
+        max_rate = max(rates.values())
+        min_rate = min(rates.values())
+        di_ratio = (min_rate / max_rate) if max_rate > 0 else 1.0
+
+    is_fair = (di_ratio >= 0.80)
+    return FairnessAuditReport(
+        group_match_rates={g: round(r, 4) for g, r in rates.items()},
+        disparate_impact_ratio=round(di_ratio, 4),
+        is_fair=is_fair,
+    )
+
+
 def evaluate(
     profile: PreferenceProfile,
     result: MatchingResult,
@@ -292,7 +557,7 @@ def evaluate(
         max_blocking_pairs: Giới hạn liệt kê blocking pair chi tiết.
 
     Returns:
-        ``EvaluationReport`` gồm blocking, satisfaction và fill rate.
+        ``EvaluationReport`` gồm blocking, satisfaction, fill rate, ranks, coverage và conflict.
     """
 
     return EvaluationReport(
@@ -301,4 +566,7 @@ def evaluate(
         ),
         satisfaction=average_satisfaction(profile, result),
         fill_rate=fill_rate(profile, result),
-    )
+        ranks=average_ranks(profile, result),
+        coverage=coverage_metrics(profile, result),
+        conflict=conflict_metrics(result.job_assignments, len(profile.candidate_ids)),
+    )

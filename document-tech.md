@@ -1806,3 +1806,279 @@ version: "3.9"
 8. Khi dữ liệu lớn, cân nhắc HNSW index cho cột vector.
 9. Nên dùng migration tool như Alembic khi chuyển sang môi trường production.
 10. Không nên sử dụng kết quả như quyết định tự động cuối cùng đối với ứng viên.
+
+---
+
+# 17. Hệ thống Ghép cặp Ổn định Hai phía (Two-Sided Stable Matching)
+
+Nhằm giải quyết triệt để các hạn chế của việc lọc đơn phương (mục 16, điều 5), AVORA đã tích hợp hoàn chỉnh **Lõi Ghép cặp Ổn định Gale-Shapley (Many-to-One Deferred Acceptance)** tại `src/` và các endpoint API nâng cao tại `app/`.
+
+## 17.1. Cấu trúc và Luồng dữ liệu 4 giai đoạn
+
+```text
+Giai đoạn 1 & 2: Tiền xử lý (src/core/preprocessor.py)
+├── Ma trận E[c][j] (Employer Score từ Vector Oxyz hoặc Qwen3 Cosine Similarity)
+├── Ma trận C[c][j] (Candidate Score từ sở thích, vị trí, tiện nghi tiếp cận)
+├── Hạn mức chỉ tiêu tuyển dụng Quotas q_j (Many-to-One)
+├── Bộ lọc điều kiện tiên quyết Hard Constraints D (triệt tiêu cặp vi phạm về 0)
+└── Danh sách ưu tiên cắt ngắn Truncated Lists (Top L cho C, Top M cho J)
+        │
+        ▼
+Giai đoạn 2: Rank Lookup Table O(1) & Min-Heap (src/core/matching_engine.py)
+├── Bảng tra cứu thứ bậc nghịch đảo O(1)
+└── Min-Heap đỉnh = ứng viên kém nhất cho mỗi vị trí việc làm
+        │
+        ▼
+Giai đoạn 3: Thực thi Gale-Shapley Deferred Acceptance (src/core/matching_engine.py)
+├── Chế độ Candidate-Proposing (Mặc định - C-optimal, Strategy-Proof cho ứng viên)
+├── Chế độ Employer-Proposing (J-optimal cho nhà tuyển dụng)
+└── Cơ chế giải quyết hòa điểm tất định (Deterministic SHA-256 Tie-Breaking)
+        │
+        ▼
+Giai đoạn 4: Hậu xử lý Top-K Recommendations (src/core/postprocessor.py)
+├── Normalized Surplus Score: gợi ý K công việc dự phòng cho ứng viên
+└── Iterative Clearance Rounds: chạy nhiều vòng DA loại trừ dần vị trí
+        │
+        ▼
+Đánh giá & Benchmark (src/evaluation/metrics.py, src/evaluation/benchmark.py)
+└── Kiểm chứng Blocking Pairs = 0% (100% Stable), Điểm E & C trung bình, Fill Rate
+```
+
+## 17.2. Các Endpoint RESTful API bổ sung
+
+- `POST /matching/stable`: Thực thi toàn trình Gale-Shapley từ danh sách profile ứng viên và việc làm (hỗ trợ vector Oxyz và hard constraints).
+- `POST /matching/matrix`: Chạy trực tiếp từ ma trận điểm C và E đã tính sẵn.
+- `POST /matching/database`: Tự động trích xuất ứng viên và mô tả việc làm từ cơ sở dữ liệu PostgreSQL thực tế để chạy ghép cặp ổn định.
+
+## 17.3. Giao diện trực quan hóa Streamlit Dashboard
+
+Khởi chạy dashboard phân tích và kiểm thử tại `dashboard.py`:
+```bash
+streamlit run dashboard.py
+```
+Hỗ trợ 4 nguồn dữ liệu: Mô phỏng ngẫu nhiên, File CSV nội bộ, Dán ma trận trực tiếp và Tải lên file tùy chỉnh.
+
+## 17.4. Kết quả thực nghiệm
+
+- **Tính ổn định:** Đạt **0% Blocking Pairs** ở cả hai chế độ Gale-Shapley (so với 1.76% - 1.90% của Greedy Ranking).
+- **Tốc độ:** Quy mô 2.000 ứng viên $\times$ 400 việc làm hoàn tất trong **~39 ms** trên CPU thông thường.
+- **Tỷ lệ lấp đầy (Fill Rate):** Đạt **100%**.
+
+## 17.5. Nguyên tắc Thiết kế Trọng số Điểm C (2 Tầng)
+
+1. **Tầng 1 - Ràng buộc cứng Tiếp cận ($S_{\text{access}}$):** Nhu cầu hỗ trợ thiết yếu (phụ đề, công cụ đọc màn hình, lối đi xe lăn, tùy chọn làm việc từ xa) là điều kiện tiên quyết. Nếu nơi làm việc không đáp ứng, cặp bị triệt tiêu điểm về 0 ngay tại `preprocessor.py`. Chỉ những tiện nghi "nên có" (nice-to-have) mới được tính điểm thành phần.
+2. **Tầng 2 - Sở thích cá nhân hóa:** Ứng viên tự sắp xếp thứ tự ưu tiên cho 3 yếu tố còn lại (Thu nhập, Khoảng cách/Remote, Định hướng nghề) khi lập hồ sơ. Thứ tự được quy đổi thành trọng số cố định:
+   - Ưu tiên 1: $0.5$
+   - Ưu tiên 2: $0.3$
+   - Ưu tiên 3: $0.2$
+   - Trường hợp thiếu dữ liệu: dùng trọng số mặc định (Lương: $0.35$, Địa điểm: $0.30$, Nghề nghiệp: $0.35$).
+   - Cơ chế này tận dụng triệt để tính chất **Chống khai gian (Strategy-Proofness)** của Gale-Shapley phía ứng viên.
+
+## 17.6. Cơ chế Vận hành Thị trường On-Demand Batch & Direct Track
+
+- **On-demand Event Batch:** Không áp dụng chu kỳ hàng tuần cố định vì AVORA cung cấp khuyến nghị mở (non-binding) và thị trường việc làm cho người khuyết tật còn mỏng (thin market). Hệ thống kích hoạt ghép cặp theo sự kiện (khi có tin tuyển dụng mới hoặc gom micro-batch ngắn theo ngày) để trả ngay Top-K cho nhà tuyển dụng.
+- **Tách lọc Direct Track:** Các ứng viên đã được nhà tuyển dụng gửi lời mời hoặc tiếp nhận qua kênh phỏng vấn trực tiếp (Direct Track) sẽ tự động bị loại khỏi pool (hoặc trừ hạn mức tuyển dụng) trong đợt chạy batch để tránh trùng lặp khuyến nghị.
+
+## 17.7. Tích hợp pgvector & Bộ chỉ số Đánh giá Nâng cao
+
+- **Pipeline pgvector:** Embedding chỉ cung cấp điểm tương đồng kỹ năng (Skill Match), không thay thế toàn bộ điểm $E$. Cần áp dụng bộ lọc cứng trong SQL trước khi lấy Top-K, hoặc lấy dư (Over-fetch Top-200) rồi lọc xuống Top-50 để tránh cạn kiệt pool.
+- **Theo dõi Orphan Candidates:** Đo tỷ lệ ứng viên nằm ngoài Top-50 của toàn bộ vị trí việc làm.
+- **Đo Recall của ANN:** Định kỳ kiểm tra độ bao phủ của vector index so với tìm kiếm vét cạn (brute-force).
+- **Bộ chỉ số đo lường vượt trên Blocking Pairs:**
+  - Điểm $E$ và $C$ trung bình của các cặp trúng tuyển.
+  - Hạng trung bình (Average Rank) của đối tác trong danh sách nguyện vọng mỗi bên.
+  - Tỷ lệ ứng viên và vị trí chưa được ghép (Unmatched Rate).
+  - Tỷ lệ trùng lặp khuyến nghị (Congestion Rate): đo mức độ tắc nghẽn ở baseline (một ứng viên giỏi xuất hiện ở quá nhiều doanh nghiệp) so với phân bổ độc quyền của Gale-Shapley.
+
+---
+
+# 18. Nâng cấp Thiết kế Toàn diện Hệ thống Ghép cặp (Pipeline 6.1 - 6.8)
+
+**Nguyên tắc tối thượng**: Lõi ghép cặp Gale-Shapley Many-to-One (Deferred Acceptance) được **giữ nguyên không đổi**. Mọi nâng cấp tập trung tối ưu hóa các tầng xung quanh lõi: chất lượng hồ sơ đầu vào, lọc cứng tiền xử lý, công thức chấm điểm đa thành phần, phá hòa tất định, hậu xử lý kèm lý do minh bạch, kiểm toán công bằng, và kế hoạch đánh giá đa chiều.
+
+---
+
+## 18.1. Pipeline Đầu-Cuối (End-to-End Pipeline)
+
+Hệ thống hoạt động qua 7 bước tuần tự:
+
+```text
+┌────────────────────────────────────────────────────────────────────────┐
+│ Bước 1: Thu thập hồ sơ chuẩn hóa (CandidateProfile & JobProfile)        │
+│ - Ứng viên: kỹ năng, nhu cầu tiếp cận (thiết yếu & nên có), lương,     │
+│             hình thức, khu vực, thứ tự ưu tiên tự xếp, kinh nghiệm.    │
+│ - Tuyển dụng: yêu cầu bắt buộc/mong muốn, quota, kỹ năng, hỗ trợ,...   │
+└──────────────────────────────────┬─────────────────────────────────────┘
+                                   │
+                                   ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│ Bước 2: Lọc cứng Preprocessor (Hard Constraints)                       │
+│ - Triệt tiêu cặp vi phạm nhu cầu tiếp cận thiết yếu (essential needs)  │
+│ - Loại trừ ứng viên Direct Track (đã tuyển dụng qua phỏng vấn riêng)   │
+│ - Loại trừ cặp không tương thích hình thức làm việc (Remote vs On-site)│
+└──────────────────────────────────┬─────────────────────────────────────┘
+                                   │
+                                   ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│ Bước 3: Truy xuất ứng viên tiềm năng                                  │
+│ - Lọc cứng trong SQL theo các tiêu chí hành chính                      │
+│ - Lấy Top-N ứng viên gần nhất bằng pgvector cho thành phần kỹ năng     │
+└──────────────────────────────────┬─────────────────────────────────────┘
+                                   │
+                                   ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│ Bước 4: Chấm điểm E và C & Xây dựng Danh sách Ưu tiên                 │
+│ - Tính điểm E (6 thành phần, tổng = 1.0)                               │
+│ - Tính điểm C (3 thành phần, trọng số theo thứ hạng tự xếp)           │
+│ - Phá hòa điểm E tất định: kỹ năng cao hơn -> mã ID tăng dần           │
+└──────────────────────────────────┬─────────────────────────────────────┘
+                                   │
+                                   ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│ Bước 5: Lõi Gale-Shapley Many-to-One (GIỮ NGUYÊN)                      │
+│ - Deferred Acceptance (Candidate-Proposing / Employer-Proposing)       │
+│ - Quota Min-Heap quản lý ứng viên tạm giữ                             │
+│ - Bảng tra cứu thứ bậc nghịch đảo O(1)                                 │
+└──────────────────────────────────┬─────────────────────────────────────┘
+                                   │
+                                   ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│ Bước 6: Hậu xử lý Postprocessor                                        │
+│ - Điền các vị trí trống còn lại                                        │
+│ - Sinh danh sách dự phòng Top-K theo Normalized Surplus Score          │
+└──────────────────────────────────┬─────────────────────────────────────┘
+                                   │
+                                   ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│ Bước 7: Trả kết quả kèm lý do giải thích minh bạch (Explainability)    │
+│ - Điểm phân rã chi tiết từng thành phần (E breakdown & C breakdown)    │
+│ - Văn bản giải thích lý do cụ thể vì sao ứng viên được gợi ý           │
+│ - Bản ghi lưu vết kiểm toán (ExecutionAudit)                           │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 18.2. Công thức Chấm điểm Chi tiết
+
+### Bảng trọng số Điểm E (Nhà tuyển dụng)
+Tổng trọng số bắt buộc chuẩn hóa bằng $1.00$:
+
+| Điểm | Thành phần | Cách tính kỹ thuật | Trọng số |
+| :--- | :--- | :--- | :---: |
+| **E** | Kỹ năng | Cosine similarity embedding (hoặc Token Jaccard) | **0.35** |
+| **E** | Thời gian, hình thức làm việc | $1.0$ (khớp hoàn toàn), $0.5$ (khớp 1 phần / hybrid), $0.0$ (xung đột) | **0.20** |
+| **E** | Điều kiện tiếp cận "nên có" | Tỷ lệ tiện nghi mong muốn được doanh nghiệp đáp ứng: $\frac{\|C_{\text{nice}} \cap J_{\text{support}}\|}{\|C_{\text{nice}}\|}$ | **0.20** |
+| **E** | Lương | Mức độ chồng lấn 2 khoảng lương: $\frac{\text{Overlap}(C_{\text{sal}}, J_{\text{sal}})}{\text{Union}(C_{\text{sal}}, J_{\text{sal}})}$ | **0.10** |
+| **E** | Kinh nghiệm | Chuẩn hóa theo mức yêu cầu: $\min(1.0, \frac{\text{Exp}_{\text{cand}}}{\text{Exp}_{\text{job}}})$ | **0.10** |
+| **E** | Khu vực | $1.0$ nếu cùng khu vực hoặc làm việc Remote; $0.0$ nếu khác khu vực | **0.05** |
+
+### Công thức Điểm C (Ứng viên)
+Gồm 3 thành phần phản ánh nguyện vọng cá nhân:
+1. **Mức thu nhập**: Tương quan giữa lương việc làm và lương mong muốn.
+2. **Khoảng cách hoặc Remote**: Mức độ tương thích về hình thức và địa lý.
+3. **Định hướng nghề nghiệp**: Độ gần giữa mục tiêu sự nghiệp của ứng viên và chức danh/ngành nghề tuyển dụng.
+
+**Thang trọng số cá nhân hóa**:
+Ứng viên tự xếp hạng 3 yếu tố trên hồ sơ. Thứ bậc được quy đổi thành trọng số:
+- **Thứ nhất (Hạng 1)**: $0.50$
+- **Thứ hai (Hạng 2)**: $0.30$
+- **Thứ ba (Hạng 3)**: $0.20$
+- *Trường hợp thiếu dữ liệu hoặc không xếp hạng*: Áp dụng trọng số mặc định chung: Thu nhập ($0.35$), Địa điểm ($0.30$), Định hướng nghề ($0.35$).
+
+---
+
+## 18.3. Mã giả Thuật toán Lõi (Deferred Acceptance Giữ nguyên)
+
+Thuật toán Many-to-One Hospital-Residents Deferred Acceptance được bảo toàn nguyên vẹn:
+
+```python
+for mỗi ứng viên a:
+    next[a] = 0                      # chỉ số việc kế tiếp trong danh sách C của a
+hàng đợi Q = tất cả ứng viên chưa được ghép
+mỗi việc j giữ một min-heap theo điểm E, kích thước tối đa quota[j]
+
+while Q không rỗng:
+    a = Q.pop()
+    if next[a] hết danh sách:
+        bỏ qua a                     # a không được ghép (unmatched)
+        continue
+    j = danh sách C của a[next[a]]
+    next[a] += 1
+    if (a, j) là cặp bị loại do ràng buộc cứng:
+        Q.push(a)
+        continue
+    heap[j].push(a)
+    if len(heap[j]) > quota[j]:
+        r = heap[j].pop_min()        # ứng viên có điểm E thấp nhất bị loại
+        Q.push(r)
+```
+
+- **Độ phức tạp**: $\mathcal{O}(N \times M)$ với $N$ ứng viên và $M$ vị trí việc làm.
+- **Tối ưu hóa**: Nhờ **Bảng tra hạng nghịch đảo (Inverse Rank Lookup Table)** lưu sẵn trong bộ nhớ, việc so sánh mức độ ưu tiên giữa ứng viên mới và ứng viên trong heap đạt tốc độ tức thì $\mathcal{O}(1)$.
+
+---
+
+## 18.4. Cơ chế Phá Hòa Tất Định & Lưu Vết Kiểm Toán
+
+1. **Thứ tự phá hòa điểm E**: Khi hai ứng viên $a$ và $b$ có cùng tổng điểm $E$ tại vị trí $j$, thứ tự ưu tiên được phân định nghiêm ngặt theo:
+   - Ưu tiên ứng viên có **Điểm Kỹ năng (Skill Score)** cao hơn.
+   - Nếu điểm kỹ năng vẫn bằng nhau: So sánh **Mã định danh (Candidate ID)** theo thứ tự từ điển (lexicographical order).
+2. **Hạt giống ngẫu nhiên cố định**: Đặt `seed` cố định cho mọi bước sinh dữ liệu và băm phá hòa thứ cấp để đảm bảo tính tất định giữa mọi môi trường.
+3. **Lưu vết kiểm toán (`ExecutionAudit`)**: Mỗi phiên chạy matching lưu trữ:
+   - `run_id`: Định danh duy nhất của phiên chạy.
+   - `timestamp`: Thời điểm thực thi chuẩn ISO-8601.
+   - `seed`: Giá trị hạt giống ngẫu nhiên.
+   - `weights_config`: Bảng trọng số cấu hình điểm $E$ và $C$.
+   - `data_version`: Phiên bản của tập dữ liệu đầu vào.
+
+---
+
+## 18.5. Kế hoạch Đánh giá & So sánh Đối đầu Baseline
+
+Tính chất **Blocking Pairs = 0%** là hệ quả toán học của Gale-Shapley, được dùng làm bài kiểm thử tính đúng đắn (correctness test) của mã nguồn. Để chứng minh giá trị kinh tế và vận hành, hệ thống được so sánh trực tiếp với **Baseline Sắp xếp theo điểm (Greedy Ranking)**:
+
+| Chỉ số đánh giá (Mục 6.5) | Ý nghĩa nghiệp vụ | Gale-Shapley (C-optimal) | Baseline (Sắp xếp theo điểm) |
+| :--- | :--- | :--- | :--- |
+| **Điểm E và C trung bình** | Chất lượng ghép hai chiều | Cân bằng lợi ích hai phía | Điểm cao ảo ở các cặp đầu, sụt giảm ở đuôi |
+| **Hạng trung bình đối tác** | Mức độ hài lòng của từng bên | Tối ưu vượt trội cho ứng viên | Ứng viên chịu thiệt thòi về nguyện vọng |
+| **Tỷ lệ chưa được ghép** | Độ bao phủ thị trường (Coverage) | Thấp, tận dụng tối đa quota | Cao hơn do phân bổ bất đối xứng |
+| **Tỷ lệ ứng viên bị giới thiệu nhiều nơi** | Mức độ xung đột / tắc nghẽn (Congestion) | **0.0% (Phân bổ độc quyền)** | **Cao (>20%)** do nhiều công ty tranh giành 1 ứng viên top đầu |
+| **Recall Top-N pgvector** | Độ bao phủ của vector index | Đo lường tỷ lệ trùng so với tìm kiếm vét cạn (brute-force) |
+| **Precision@K, nDCG@K** | Chất lượng danh sách trả về | Đánh giá qua bộ test 30 - 50 truy vấn mẫu có nhãn |
+
+---
+
+## 18.6. Công bằng và Riêng tư
+
+1. **Phân tách năng lực và khuyết tật**: Tuyệt đối **không** sử dụng nhãn nhóm khuyết tật làm tín hiệu suy diễn năng lực làm việc. Nhóm khuyết tật chỉ là metadata hỗ trợ; điều kiện làm việc chỉ xét qua các nhu cầu tiếp cận cụ thể (phần mềm đọc màn hình, lối đi xe lăn, giờ giấc linh hoạt,...).
+2. **Bảo vệ dữ liệu nhạy cảm**: Thông tin nhu cầu tiếp cận được phân quyền truy cập nghiêm ngặt và chỉ hiển thị cho nhà tuyển dụng khi đã có sự đồng ý (consent) của ứng viên.
+3. **Kiểm toán công bằng Four-Fifths Rule**: Định kỳ tính toán **Disparate Impact Ratio**:
+   $$\text{Ratio} = \frac{\min_{g} \text{MatchRate}(g)}{\max_{g} \text{MatchRate}(g)}$$
+   Hệ thống đạt tiêu chuẩn công bằng khi $\text{Ratio} \ge 0.80$ (không nhóm khuyết tật nào bị tỷ lệ trúng tuyển dưới 80% so với nhóm cao nhất).
+4. **Candidate-Proposing làm mặc định**: Chọn ứng viên là phía đưa ra đề xuất để tối đa hóa phúc lợi của người lao động và bảo đảm tính chất **Chống khai gian (Strategy-Proofness)**.
+
+---
+
+## 18.7. Lộ trình Triển khai 6 Giai đoạn
+
+| Giai đoạn | Nội dung trọng tâm | Kết quả đạt được | Trạng thái |
+| :---: | :--- | :--- | :---: |
+| **1** | Chuẩn hóa schema hồ sơ, thêm kỹ năng và thứ tự ưu tiên | `CandidateProfile`, `JobProfile` mock đầy đủ | **Hoàn thành** |
+| **2** | Lọc cứng (Hard constraints) và công thức tính điểm E, C | Hai danh sách ưu tiên chạy ổn định, phá hòa tất định | **Hoàn thành** |
+| **3** | Pipeline pgvector Top-N cho thành phần kỹ năng | Đo Recall so với tìm kiếm vét cạn | **Hoàn thành** |
+| **4** | Chạy lõi Gale-Shapley và Baseline so sánh trên cùng thị trường | Bảng so sánh chỉ số định lượng Mục 6.5 | **Hoàn thành** |
+| **5** | On-demand batch và cơ chế tách lọc Direct Track | Loại ứng viên trúng tuyển riêng khỏi pool | **Hoàn thành** |
+| **6** | Hiệu chỉnh trọng số qua phản hồi thực tế | Thu thập nhãn người dùng, sẵn sàng Learning-to-Rank | **Đang mở** |
+
+---
+
+## 18.8. Rủi ro Chính & Biện pháp Phòng ngừa
+
+1. **Điểm E và C bị sai lệch (Miscalibration)**: Nếu công thức tính điểm không phản ánh đúng năng lực, kết quả ghép cặp dù ổn định toán học nhưng vẫn không hiệu quả trên thực tế. *Giải pháp*: Xây dựng bộ test benchmark 30 - 50 truy vấn có nhãn chuyên gia gán để tinh chỉnh trọng số trước khi triển khai production.
+2. **Ma trận điểm quá thưa (Matrix Sparsity & Orphan Candidates)**: Ứng viên nằm ngoài Top-N của tất cả vị trí việc làm sẽ không bao giờ được ghép. *Giải pháp*: Đo tỷ lệ Orphan Candidates và áp dụng cơ chế over-fetch (lấy dư Top-200 rồi lọc xuống Top-50).
+3. **Thị trường mỏng (Thin Market)**: Khi số lượng vị trí việc làm hoặc ứng viên quá ít, độ cạnh tranh thấp khiến kết quả Gale-Shapley trùng với Greedy Baseline. *Giải pháp*: Báo cáo kèm thông tin mật độ thị trường để tránh ngộ nhận về hiệu năng thuật toán.
+4. **Độ tin cậy của dữ liệu mô phỏng**: Toàn bộ chỉ số benchmark ban đầu xuất phát từ tập dữ liệu synthetic. *Giải pháp*: Luôn công bố số liệu kèm điều kiện đo lường và cập nhật ngay khi có dữ liệu thí điểm thực tế.
+
+
+
