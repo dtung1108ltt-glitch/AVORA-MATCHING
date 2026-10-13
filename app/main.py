@@ -4,7 +4,8 @@ import time
 from collections import defaultdict
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, Query, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
+from fastapi.responses import JSONResponse
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -79,6 +80,14 @@ app = FastAPI(
         "và hệ thống khuyến nghị việc làm dự phòng Top-K Recommendations."
     ),
 )
+ 
+@app.exception_handler(ValueError)
+async def value_error_exception_handler(request: Request, exc: ValueError) -> JSONResponse:
+    """Xử lý ngoại lệ ValueError (validation nghiệp vụ) và trả về HTTP 422."""
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={"detail": str(exc)},
+    )
 
 # Biên độ điểm dung sai để chọn nhóm khuyết tật gần nhóm tốt nhất
 GROUP_SCORE_MARGIN = 0.03
@@ -606,7 +615,14 @@ def stable_matching_endpoint(
             - metrics: Báo cáo chỉ số KPIs hoàn chỉnh (Blocking Pairs = 0, Fill Rate, Satisfaction).
     """
     # Gọi hàm điều phối toàn trình trong module matching
-    return run_stable_matching(request)
+    try:
+        return run_stable_matching(request)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        )
+
 
 
 @app.post(

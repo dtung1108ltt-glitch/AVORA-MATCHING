@@ -908,19 +908,41 @@ def run_stable_matching(request: StableMatchingRequest) -> StableMatchingRespons
     candidate_ids = [c.id for c in request.candidates]
     job_ids = [j.id for j in request.jobs]
 
-    # Thống kê số lượng ứng viên Direct Track đã được tuyển theo từng vị trí
+    # Kiểm tra tính hợp lệ của Direct Track và tính quota thực tế
+    valid_job_ids = {j.id for j in request.jobs if j.id} | {getattr(j, "job_id", None) for j in request.jobs if getattr(j, "job_id", None)}
+    valid_job_ids.discard(None)
+
     direct_hired_counts: dict[str, int] = {}
     for c in request.candidates:
-        if c.direct_track and getattr(c, "hired_job_id", None):
-            direct_hired_counts[c.hired_job_id] = (
-                direct_hired_counts.get(c.hired_job_id, 0) + 1
-            )
+        c_id = c.id or getattr(c, "candidate_id", "unknown")
+        if c.direct_track:
+            hired_job = getattr(c, "hired_job_id", None)
+            if not hired_job or not str(hired_job).strip():
+                raise ValueError(
+                    f"Ứng viên '{c_id}' có direct_track=True nhưng thiếu hired_job_id "
+                    "(bắt buộc phải chỉ định vị trí đã trúng tuyển)."
+                )
+            if hired_job not in valid_job_ids:
+                raise ValueError(
+                    f"Ứng viên '{c_id}' Direct Track trỏ tới vị trí không tồn tại: '{hired_job}'. "
+                    f"Danh sách vị trí hợp lệ: {sorted(valid_job_ids)}"
+                )
+            direct_hired_counts[hired_job] = direct_hired_counts.get(hired_job, 0) + 1
 
     # Tính quota thực tế còn lại cho từng vị trí
     quotas = {}
     for j in request.jobs:
-        direct_count = direct_hired_counts.get(j.id, 0) + getattr(j, "filled_slots", 0)
-        quotas[j.id] = max(0, int(j.quota) - direct_count)
+        j_id = j.id or getattr(j, "job_id", "")
+        direct_count = direct_hired_counts.get(j_id, 0)
+        filled = getattr(j, "filled_slots", 0)
+        total_pre_filled = direct_count + filled
+        if total_pre_filled > int(j.quota):
+            raise ValueError(
+                f"Vị trí '{j_id}' có số lượng tuyển trực tiếp ({direct_count}) "
+                f"cộng số chỗ đã lấp ngoài hệ thống ({filled}) = {total_pre_filled} "
+                f"vượt quá hạn mức tuyển dụng (quota={j.quota})."
+            )
+        quotas[j_id] = int(j.quota) - total_pre_filled
 
     # -----------------------------------------------------------------------
     # GIAI ĐOẠN 1: Tính toán ma trận Điểm E và Điểm C
@@ -942,6 +964,11 @@ def run_stable_matching(request: StableMatchingRequest) -> StableMatchingRespons
         c_id = c.id
         for j in request.jobs:
             j_id = j.id
+
+            if c.direct_track:
+                raw_e_matrix[c_id][j_id] = 0.0
+                raw_c_matrix[c_id][j_id] = 0.0
+                continue
 
             if quotas.get(j_id, 0) <= 0:
                 raw_e_matrix[c_id][j_id] = 0.0

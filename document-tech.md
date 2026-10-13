@@ -1877,7 +1877,18 @@ Hỗ trợ 4 nguồn dữ liệu: Mô phỏng ngẫu nhiên, File CSV nội bộ
 ## 17.6. Cơ chế Vận hành Thị trường On-Demand Batch & Direct Track
 
 - **On-demand Event Batch:** Không áp dụng chu kỳ hàng tuần cố định vì AVORA cung cấp khuyến nghị mở (non-binding) và thị trường việc làm cho người khuyết tật còn mỏng (thin market). Hệ thống kích hoạt ghép cặp theo sự kiện (khi có tin tuyển dụng mới hoặc gom micro-batch ngắn theo ngày) để trả ngay Top-K cho nhà tuyển dụng.
-- **Tách lọc Direct Track:** Các ứng viên đã được nhà tuyển dụng gửi lời mời hoặc tiếp nhận qua kênh phỏng vấn trực tiếp (Direct Track) sẽ tự động bị loại khỏi pool (hoặc trừ hạn mức tuyển dụng) trong đợt chạy batch để tránh trùng lặp khuyến nghị.
+- **Tách lọc Direct Track & Phân định với filled_slots:**
+  * **Direct Track (`direct_track=True`):** Đại diện cho ứng viên trong hệ thống đã được doanh nghiệp tuyển thẳng (direct hire) vào một vị trí cụ thể (`hired_job_id`). Ứng viên này được rút khỏi matching pool của batch hiện tại và trừ 1 slot trong chỉ tiêu khả dụng của `hired_job_id`.
+  * **Chỗ đã lấp ngoài hệ thống (`filled_slots`):** Đại diện cho số lượng vị trí mà doanh nghiệp đã tuyển trước từ **bên ngoài hệ thống** (external hires) trước đợt matching.
+  * **Quy tắc cộng dồn và chống đếm hai lần (Double Deduction Prevention):** Khi vừa có ứng viên Direct Track trong batch, vừa khai báo `filled_slots`, hai số này sẽ được cộng dồn:
+    $$\text{Total Pre-filled} = \text{Count}(\text{Direct Track}) + \text{filled\_slots}$$
+    $$\text{Remaining Quota} = \text{quota} - \text{Total Pre-filled}$$
+    Nếu `filled_slots` đã bao gồm cả người tuyển trực tiếp thì sẽ bị trừ hai lần. Do đó, tài liệu và API quy định rõ ràng: **`filled_slots` là chỗ đã lấp từ ngoài hệ thống, KHÔNG tính các ứng viên Direct Track có trong danh sách input của batch hiện tại.**
+  * **Xử lý 3 trường hợp biên của Direct Track (Chặn và trả về HTTP 422):** Thay vì im lặng bỏ qua hoặc ép quota về 0, hệ thống kiểm tra nghiêm ngặt và trả về mã lỗi **422 Unprocessable Entity** (ném `ValueError` ở mức engine):
+    1. `direct_track=True` nhưng thiếu hoặc để trống `hired_job_id`: Bị từ chối ngay lập tức để tránh tình trạng ứng viên bị rút khỏi pool nhưng không trừ quota vị trí nào (nguy cơ tuyển vượt).
+    2. `hired_job_id` trỏ tới vị trí không tồn tại trong danh sách việc làm: Bị từ chối ngay lập tức kèm danh sách các `job_id` hợp lệ.
+    3. Tổng số người tuyển trực tiếp cộng `filled_slots` vượt quá `quota` (ví dụ 2 người tuyển trực tiếp vào việc 1 chỗ): Bị từ chối ngay lập tức, không để quota bị ép về 0 trong im lặng mà không cảnh báo.
+
 
 ## 17.7. Tích hợp pgvector & Bộ chỉ số Đánh giá Nâng cao
 
@@ -2079,6 +2090,44 @@ Tính chất **Blocking Pairs = 0%** là hệ quả toán học của Gale-Shapl
 2. **Ma trận điểm quá thưa (Matrix Sparsity & Orphan Candidates)**: Ứng viên nằm ngoài Top-N của tất cả vị trí việc làm sẽ không bao giờ được ghép. *Giải pháp*: Đo tỷ lệ Orphan Candidates và áp dụng cơ chế over-fetch (lấy dư Top-200 rồi lọc xuống Top-50).
 3. **Thị trường mỏng (Thin Market)**: Khi số lượng vị trí việc làm hoặc ứng viên quá ít, độ cạnh tranh thấp khiến kết quả Gale-Shapley trùng với Greedy Baseline. *Giải pháp*: Báo cáo kèm thông tin mật độ thị trường để tránh ngộ nhận về hiệu năng thuật toán.
 4. **Độ tin cậy của dữ liệu mô phỏng**: Toàn bộ chỉ số benchmark ban đầu xuất phát từ tập dữ liệu synthetic. *Giải pháp*: Luôn công bố số liệu kèm điều kiện đo lường và cập nhật ngay khi có dữ liệu thí điểm thực tế.
+
+---
+
+## 18.9. Lớp Kiểm tra Tính Ổn định Vét cạn Độc lập (Independent Stability Checker)
+
+Nhằm đảm bảo tính khách quan và độc lập toán học tuyệt đối, hệ thống kiểm thử của dự án trang bị **hai lớp kiểm tra song song**:
+
+- **Lớp 1 (Nội bộ dự án):** Sử dụng hàm `find_blocking_pairs` của module `metrics` và `matching`, tối ưu hóa hiệu năng bằng bảng tra cứu thứ hạng $O(1)$.
+- **Lớp 2 (Độc lập 100% - `tests/test_exhaustive_stability_checker.py`):** Triển khai hàm kiểm tra vét cạn thuần túy (`independent_find_blocking_pairs`), không sử dụng lại bất kỳ cấu trúc dữ liệu nội bộ hay bảng tra cứu nào từ engine. Hàm này:
+  - Duyệt qua toàn bộ tích Descartes $C \times J$.
+  - Kiểm tra trực tiếp từ nguyên lý toán học Gale-Shapley Many-to-One:
+    * Điều kiện 1: Ứng viên thích vị trí $j$ hơn vị trí hiện tại (hoặc đang thất nghiệp).
+    * Điều kiện 2a: Vị trí $j$ còn chỉ tiêu trống ($|\mu(j)| < q_j$).
+    * Điều kiện 2b: Vị trí $j$ đã đủ chỉ tiêu nhưng có ít nhất một ứng viên trúng tuyển kém hơn ứng viên đang xét theo thứ tự nguyện vọng của $j$.
+  - Kiểm tra tính hợp lý cá nhân (Individual Rationality) và tính toàn vẹn của Quota.
+
+Kết quả kiểm thử trên nhiều hạt giống ngẫu nhiên (42, 101, 777, 2024, 9999) chứng minh: cả hai lớp kiểm tra đều đồng thuận đạt **0% Blocking Pairs** cho Gale-Shapley, và cùng phát hiện chính xác các cặp bất ổn khi chạy trên Baseline Greedy hoặc khi cố ý hoán đổi kết quả phân bổ.
+
+---
+
+## 18.10. Các Ghi nhận & Lưu ý Kỹ thuật Trung thực (Honest Technical Disclosures)
+
+Trong quá trình đánh giá và thực nghiệm hệ thống, một số quan sát kỹ thuật quan trọng cần được ghi nhận minh bạch:
+
+1. **Điểm C trung bình của Gale-Shapley so với Greedy Baseline:**
+   - Khi đo lường trên cùng một tập dữ liệu, thuật toán Greedy có thể đạt điểm trung bình nguyện vọng ứng viên (Điểm C) cao hơn nhẹ ở các cặp ghép đầu tiên so với Gale-Shapley. Điều này hoàn toàn tự nhiên vì Greedy là thuật toán tham lam đơn phương: nó chỉ tối ưu tổng điểm trước mắt mà bỏ qua sự bất ổn hai chiều.
+   - Hậu quả của Greedy là tạo ra tỷ lệ **Blocking Pairs > 1.7%**, tiềm ẩn nguy cơ phá vỡ thỏa thuận và giao dịch ngầm ngoài hệ thống. Gale-Shapley chấp nhận cân bằng hai chiều để bảo đảm **100% tính ổn định (0% Blocking Pairs)** và **chống khai gian (Strategy-Proofness)** cho ứng viên.
+2. **Hiện tượng C-optimal trùng J-optimal ở Benchmark:**
+   - Trong các lượt chạy benchmark trên tập dữ liệu mô phỏng hiện tại, kết quả của Candidate-Proposing (C-optimal) và Employer-Proposing (J-optimal) thường trùng khớp nhau.
+   - Hiện tượng này phù hợp với lý thuyết cấu trúc lưới Ghép cặp Ổn định (Roth & Sotomayor, 1990): khi thị trường có độ tương quan nguyện vọng cao hoặc tập ứng viên/vị trí nhỏ, lõi các phân bổ ổn định (Core of Stable Matchings) thu hẹp thành một điểm duy nhất (singleton), khiến nghiệm tối ưu của hai phía hợp nhất làm một.
+3. **Mật khẩu Docker mặc định:**
+   - File cấu hình `docker-compose.yml` hiện đặt mật khẩu PostgreSQL mặc định (`postgres / postgres`) nhằm tạo thuận lợi cho việc kiểm thử và chạy môi trường dev cục bộ. Khi đưa vào môi trường Production hoặc Staging, bắt buộc phải thay thế bằng biến môi trường bảo mật qua `.env` hoặc Secret Manager.
+4. **Phạm vi Dữ liệu Thử nghiệm:**
+   - Toàn bộ kết quả định lượng hiện nay đều được đo lường trên tập dữ liệu mô phỏng (Synthetic Market) với các hạt giống benchmark cố định nhằm bảo đảm tính tái lập (reproducibility). Cần tiếp tục tiến hành đo lường Monte Carlo mở rộng và đánh giá trên dữ liệu thí điểm thực tế khi triển khai với người dùng thật.
+5. **Dấu vết Đường dẫn trong Lịch sử Git cũ:**
+   - Các file rác và file nhật ký chẩn đoán tạm thời (`_diag*.txt`, `_watch.py`, `_*.log`) đã được gỡ bỏ khỏi Git index và đưa vào `.gitignore` từ commit `cd00caf`. Các file này không chứa mật khẩu hay thông tin bí mật nên rủi ro an ninh ở mức thấp.
+   - Tuy nhiên, đường dẫn thư mục cá nhân cục bộ (`C:\Users\dtung`) vẫn còn tồn tại trong lịch sử commit cũ (`fe5e120`). Nếu có yêu cầu bảo mật nghiêm ngặt hoặc công khai mã nguồn mở, có thể sử dụng công cụ `git-filter-repo` hoặc BFG Repo-Cleaner để làm sạch hoàn toàn lịch sử Git.
+
 
 
 

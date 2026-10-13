@@ -371,6 +371,17 @@ class CandidateProfileInput(BaseModel):
                 data["id"] = data["candidate_id"]
         return data
 
+    @model_validator(mode="after")
+    def validate_direct_track(self) -> CandidateProfileInput:
+        if self.direct_track:
+            c_id = self.id or self.candidate_id or "unknown"
+            if not self.hired_job_id or not str(self.hired_job_id).strip():
+                raise ValueError(
+                    f"Ứng viên '{c_id}' có direct_track=True nhưng thiếu hired_job_id "
+                    "(bắt buộc phải chỉ định vị trí đã trúng tuyển)."
+                )
+        return self
+
 
 class JobProfileInput(BaseModel):
     """
@@ -384,7 +395,11 @@ class JobProfileInput(BaseModel):
     job_id: str | None = Field(default=None, description="Định danh vị trí (alias cho id)")
     title: str | None = Field(default=None, description="Tên hoặc chức danh công việc")
     quota: int = Field(default=1, ge=0, description="Hạn mức tuyển dụng q_j: số lượng chỉ tiêu tối đa cho vị trí (Many-to-One, >= 0)")
-    filled_slots: int = Field(default=0, ge=0, description="Số lượng chỉ tiêu đã tuyển trước (ví dụ qua Direct Track)")
+    filled_slots: int = Field(
+        default=0,
+        ge=0,
+        description="Số lượng chỉ tiêu đã tuyển trước từ nguồn bên ngoài hệ thống (external hires), KHÔNG tính ứng viên Direct Track trong batch hiện tại để tránh bị đếm hai lần"
+    )
     vector_oxyz: Vector3D | None = Field(default=None, description="Tọa độ vector yêu cầu tuyển dụng trong không gian Oxyz")
     skills_required: list[float] | str | list[str] | None = Field(default=None, description="Kỹ năng yêu cầu")
     access_support_provided: list[str] | None = Field(default=None, description="Các điều kiện hỗ trợ tiếp cận cung cấp")
@@ -403,6 +418,17 @@ class JobProfileInput(BaseModel):
             if not data.get("id") and data.get("job_id"):
                 data["id"] = data["job_id"]
         return data
+
+    @model_validator(mode="after")
+    def validate_filled_slots(self) -> JobProfileInput:
+        j_id = self.id or self.job_id or "unknown"
+        if self.filled_slots > self.quota:
+            raise ValueError(
+                f"Vị trí '{j_id}' có số chỗ đã lấp ngoài hệ thống (filled_slots={self.filled_slots}) "
+                f"vượt quá hạn mức tuyển dụng (quota={self.quota})."
+            )
+        return self
+
     preferences: list[str] | None = Field(
         default=None,
         description="Danh sách ID ứng viên được sắp xếp theo thứ tự ưu tiên giảm dần của nhà tuyển dụng"
@@ -458,6 +484,41 @@ class StableMatchingRequest(BaseModel):
         if cleaned not in ("candidate", "employer"):
             raise ValueError("optimal phải là 'candidate' (C-optimal) hoặc 'employer' (J-optimal)")
         return cleaned
+
+    @model_validator(mode="after")
+    def validate_direct_track_and_quotas(self) -> StableMatchingRequest:
+        valid_job_ids = {j.id for j in self.jobs if j.id} | {j.job_id for j in self.jobs if j.job_id}
+        valid_job_ids.discard(None)
+
+        direct_hired_counts: dict[str, int] = {}
+        for c in self.candidates:
+            c_id = c.id or c.candidate_id or "unknown"
+            if c.direct_track:
+                if not c.hired_job_id or not str(c.hired_job_id).strip():
+                    raise ValueError(
+                        f"Ứng viên '{c_id}' có direct_track=True nhưng thiếu hired_job_id "
+                        "(bắt buộc phải chỉ định vị trí đã trúng tuyển)."
+                    )
+                if c.hired_job_id not in valid_job_ids:
+                    raise ValueError(
+                        f"Ứng viên '{c_id}' Direct Track trỏ tới vị trí không tồn tại: '{c.hired_job_id}'. "
+                        f"Danh sách vị trí hợp lệ: {sorted(valid_job_ids)}"
+                    )
+                direct_hired_counts[c.hired_job_id] = (
+                    direct_hired_counts.get(c.hired_job_id, 0) + 1
+                )
+
+        for j in self.jobs:
+            j_id = j.id or j.job_id or "unknown"
+            direct_count = direct_hired_counts.get(j_id, 0)
+            total_filled = direct_count + j.filled_slots
+            if total_filled > j.quota:
+                raise ValueError(
+                    f"Vị trí '{j_id}' có số lượng tuyển trực tiếp ({direct_count}) "
+                    f"cộng số chỗ đã lấp ngoài hệ thống ({j.filled_slots}) = {total_filled} "
+                    f"vượt quá hạn mức tuyển dụng (quota={j.quota})."
+                )
+        return self
 
 
 class MatrixMatchingRequest(BaseModel):
@@ -603,3 +664,8 @@ class StableMatchingResponse(BaseModel):
         default=0.0,
         description="Thời gian thực thi toàn bộ pipeline thuật toán (mili-giây)"
     )
+    warnings: list[str] = Field(
+        default_factory=list,
+        description="Danh sách các cảnh báo dữ liệu hoặc nghiệp vụ phát hiện trong quá trình xử lý"
+    )
+

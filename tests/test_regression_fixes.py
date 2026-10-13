@@ -231,6 +231,118 @@ class TestDirectTrackQuotaDeduction(unittest.TestCase):
         result = GaleShapleyMatching(profile).solve()
         self.assertEqual(result.job_assignments.get("j1", []), [])
 
+    def test_direct_track_missing_hired_job_id_raises_error(self) -> None:
+        """direct_track=True nhưng thiếu hired_job_id phải ném ValueError."""
+        # Kiểm tra ở mức CandidateProfile
+        with self.assertRaises(ValueError) as ctx:
+            CandidateProfile(candidate_id="c_err", direct_track=True, hired_job_id=None)
+        self.assertIn("hired_job_id", str(ctx.exception))
+
+        # Kiểm tra khi chuỗi rỗng
+        with self.assertRaises(ValueError) as ctx:
+            CandidateProfile(candidate_id="c_err2", direct_track=True, hired_job_id="   ")
+        self.assertIn("hired_job_id", str(ctx.exception))
+
+    def test_direct_track_nonexistent_job_raises_error(self) -> None:
+        """hired_job_id trỏ tới việc không tồn tại phải ném ValueError."""
+        cand = CandidateProfile(candidate_id="c1", direct_track=True, hired_job_id="job_ghost")
+        job = JobProfile(job_id="job_real", quota=2)
+        with self.assertRaises(ValueError) as ctx:
+            build_profile_from_profiles([cand], [job])
+        self.assertIn("không tồn tại", str(ctx.exception))
+
+    def test_direct_track_exceeds_quota_raises_error(self) -> None:
+        """Tuyển trực tiếp nhiều hơn quota (2 người vào việc 1 chỗ) phải ném ValueError."""
+        cand1 = CandidateProfile(candidate_id="c1", direct_track=True, hired_job_id="j1")
+        cand2 = CandidateProfile(candidate_id="c2", direct_track=True, hired_job_id="j1")
+        job = JobProfile(job_id="j1", quota=1)
+        with self.assertRaises(ValueError) as ctx:
+            build_profile_from_profiles([cand1, cand2], [job])
+        self.assertIn("vượt quá hạn mức tuyển dụng", str(ctx.exception))
+
+    def test_direct_track_plus_filled_slots_exceeds_quota_raises_error(self) -> None:
+        """1 người tuyển trực tiếp + filled_slots=1 vào việc 1 chỗ phải ném ValueError."""
+        cand = CandidateProfile(candidate_id="c1", direct_track=True, hired_job_id="j1")
+        job = JobProfile(job_id="j1", quota=1, filled_slots=1)
+        with self.assertRaises(ValueError) as ctx:
+            build_profile_from_profiles([cand], [job])
+        self.assertIn("vượt quá hạn mức tuyển dụng", str(ctx.exception))
+
+    def test_filled_slots_exceeds_quota_raises_error(self) -> None:
+        """filled_slots lớn hơn quota ngay khi khởi tạo JobProfile phải ném ValueError."""
+        with self.assertRaises(ValueError) as ctx:
+            JobProfile(job_id="j1", quota=1, filled_slots=2)
+        self.assertIn("vượt quá hạn mức tuyển dụng", str(ctx.exception))
+
+    def test_valid_direct_track_and_filled_slots_exact_quota(self) -> None:
+        """Hợp lệ: 1 Direct Track + 1 filled_slots trên việc có quota 2 -> quota còn lại 0, không lỗi."""
+        cand_dt = CandidateProfile(candidate_id="c_dt", direct_track=True, hired_job_id="j1")
+        cand_regular = CandidateProfile(candidate_id="c_reg", direct_track=False, skills=[1.0, 0.0])
+        job = JobProfile(job_id="j1", quota=2, filled_slots=1, skills_required=[1.0, 0.0])
+
+        profile = build_profile_from_profiles([cand_dt, cand_regular], [job])
+        self.assertEqual(profile.quotas["j1"], 0)
+        self.assertEqual(len(profile.candidate_preferences), 1)
+        self.assertIn("c_reg", profile.candidate_preferences)
+
+    def test_api_422_on_direct_track_edge_cases(self) -> None:
+        """API trả về 422 Unprocessable Entity cho cả ba trường hợp biên Direct Track."""
+        client = TestClient(app)
+
+        # Trường hợp 1: direct_track=True nhưng thiếu hired_job_id
+        resp1 = client.post(
+            "/matching/stable",
+            json={
+                "candidates": [
+                    {"candidate_id": "c1", "direct_track": True, "hired_job_id": None}
+                ],
+                "jobs": [{"job_id": "j1", "quota": 1}],
+            },
+        )
+        self.assertEqual(resp1.status_code, 422, f"Expected 422, got {resp1.status_code}: {resp1.text}")
+        self.assertIn("hired_job_id", resp1.text)
+
+        # Trường hợp 2: hired_job_id trỏ tới việc không tồn tại
+        resp2 = client.post(
+            "/matching/stable",
+            json={
+                "candidates": [
+                    {"candidate_id": "c1", "direct_track": True, "hired_job_id": "j_ghost"}
+                ],
+                "jobs": [{"job_id": "j1", "quota": 1}],
+            },
+        )
+        self.assertEqual(resp2.status_code, 422, f"Expected 422, got {resp2.status_code}: {resp2.text}")
+        self.assertIn("j_ghost", resp2.text)
+
+        # Trường hợp 3: Tuyển trực tiếp nhiều hơn quota (2 người vào việc 1 chỗ)
+        resp3 = client.post(
+            "/matching/stable",
+            json={
+                "candidates": [
+                    {"candidate_id": "c1", "direct_track": True, "hired_job_id": "j1"},
+                    {"candidate_id": "c2", "direct_track": True, "hired_job_id": "j1"},
+                ],
+                "jobs": [{"job_id": "j1", "quota": 1}],
+            },
+        )
+        self.assertEqual(resp3.status_code, 422, f"Expected 422, got {resp3.status_code}: {resp3.text}")
+        self.assertIn("vượt quá", resp3.text)
+
+        # Trường hợp 3b: direct_track + filled_slots vượt quá quota
+        resp3b = client.post(
+            "/matching/stable",
+            json={
+                "candidates": [
+                    {"candidate_id": "c1", "direct_track": True, "hired_job_id": "j1"},
+                ],
+                "jobs": [{"job_id": "j1", "quota": 1, "filled_slots": 1}],
+            },
+        )
+        self.assertEqual(resp3b.status_code, 422, f"Expected 422, got {resp3b.status_code}: {resp3b.text}")
+        self.assertIn("vượt quá", resp3b.text)
+
+
 
 class TestIsStableVerification(unittest.TestCase):
     """Kiểm thử cờ is_stable trong MatchingResult (Lỗi 4)."""

@@ -915,6 +915,18 @@ mô phỏng bằng:
 - Khi quota hoặc danh sách ưu tiên thay đổi, cần dựng lại `PreferenceProfile`
   trước khi gọi `solve()`.
 
+### 23.15. Cơ chế Direct Track, filled_slots và Xử lý Biên (HTTP 422)
+
+- **Direct Track (`direct_track=True`)**: Áp dụng cho các ứng viên đã được doanh nghiệp tuyển thẳng vào một vị trí cụ thể (`hired_job_id`). Ứng viên này được rút khỏi matching pool của batch hiện tại và trừ 1 slot trong quota khả dụng của `hired_job_id`.
+- **Chỗ đã lấp ngoài hệ thống (`filled_slots`)**: Đại diện cho số lượng chỉ tiêu doanh nghiệp đã tuyển từ **bên ngoài hệ thống** (external hires) trước đợt matching.
+- **Quy tắc phân định tránh đếm hai lần**: Khi đồng thời có ứng viên Direct Track và khai báo `filled_slots`, hai số này sẽ được cộng dồn. `filled_slots` **chỉ tính chỗ đã lấp ngoài hệ thống, KHÔNG tính ứng viên Direct Track có trong input** để tránh bị trừ hai lần quota.
+- **Kiểm soát tính toàn vẹn dữ liệu (HTTP 422 Unprocessable Entity)**: API `/matching/stable` và engine kiểm tra nghiêm ngặt 3 trường hợp biên sau thay vì chạy tiếp trong im lặng:
+  1. `direct_track=True` nhưng thiếu hoặc rỗng `hired_job_id` -> Trả về lỗi 422 (chặn nguy cơ ứng viên bị rút khỏi pool mà không trừ quota vị trí nào).
+  2. `hired_job_id` trỏ tới vị trí không tồn tại trong danh sách việc làm -> Trả về lỗi 422 kèm danh sách job hợp lệ.
+  3. Tuyển trực tiếp nhiều hơn quota hoặc `direct_track_count + filled_slots > quota` -> Trả về lỗi 422 (ngăn chặn tình trạng quota bị âm thầm ép về 0).
+- **Lớp kiểm tra tính ổn định vét cạn độc lập (`tests/test_exhaustive_stability_checker.py`)**: Kiểm thử song song độc lập hoàn toàn với engine từ nguyên lý toán học gốc Gale-Shapley Many-to-One, bổ sung cho lớp kiểm tra của dự án.
+
+
 ## 24. Dashboard Streamlit - giao diện thử nghiệm engine Gale-Shapley
 
 Repo hiện có **hai giao diện web độc lập**, không phụ thuộc nhau:

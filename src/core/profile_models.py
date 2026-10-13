@@ -54,6 +54,14 @@ class CandidateProfile:
     hired_job_id: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        if self.direct_track:
+            if not self.hired_job_id or not str(self.hired_job_id).strip():
+                raise ValueError(
+                    f"Ứng viên '{self.candidate_id}' có direct_track=True nhưng thiếu hired_job_id "
+                    "(bắt buộc phải chỉ định vị trí đã trúng tuyển qua Direct Track)."
+                )
+
     def get_salary_range(self) -> tuple[float, float]:
         """Trả về khoảng lương mong muốn (min, max)."""
         s_min = max(0.0, float(self.expected_salary_min))
@@ -91,6 +99,9 @@ class JobProfile:
         job_id: Định danh duy nhất của vị trí việc làm.
         title: Tên chức danh công việc.
         quota: Số vị trí cần tuyển dụng (Many-to-One quota q_j >= 1).
+        filled_slots: Số lượng chỉ tiêu đã tuyển trước từ bên ngoài hệ thống (external hires).
+                      Lưu ý: KHÔNG bao gồm các ứng viên Direct Track được khai báo trong batch
+                      hiện tại để tránh bị cộng dồn và đếm hai lần.
         skills_required: Kỹ năng yêu cầu (vector embedding, chuỗi văn bản hoặc danh sách từ khóa).
         access_support_provided: Danh sách các điều kiện/tiện nghi tiếp cận mà doanh nghiệp đáp ứng.
         salary_min: Mức lương chi trả tối thiểu.
@@ -119,6 +130,17 @@ class JobProfile:
     career_domain: list[float] | str = ""
     mandatory_requirements: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.quota < 0:
+            raise ValueError(f"Vị trí '{self.job_id}' có quota={self.quota} < 0 không hợp lệ.")
+        if self.filled_slots < 0:
+            raise ValueError(f"Vị trí '{self.job_id}' có filled_slots={self.filled_slots} < 0 không hợp lệ.")
+        if self.filled_slots > self.quota:
+            raise ValueError(
+                f"Vị trí '{self.job_id}' có số chỗ đã lấp ngoài hệ thống "
+                f"(filled_slots={self.filled_slots}) vượt quá hạn mức tuyển dụng (quota={self.quota})."
+            )
 
     @property
     def remaining_quota(self) -> int:

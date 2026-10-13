@@ -559,22 +559,36 @@ class Preprocessor:
         c_scores: dict[Id, dict[Id, float]] = {}
         skill_scores: dict[Id, dict[Id, float]] = {}
 
-        # Thống kê số lượng ứng viên Direct Track đã được tuyển theo từng vị trí
+        # Thống kê và kiểm tra số lượng ứng viên Direct Track đã được tuyển theo từng vị trí
+        job_ids = {job.job_id for job in jobs}
         direct_hired_counts: dict[Id, int] = {}
         for c in candidates:
-            if c.direct_track and getattr(c, "hired_job_id", None):
-                direct_hired_counts[c.hired_job_id] = (
-                    direct_hired_counts.get(c.hired_job_id, 0) + 1
-                )
+            if c.direct_track:
+                hired_id = getattr(c, "hired_job_id", None)
+                if not hired_id or not str(hired_id).strip():
+                    raise ValueError(
+                        f"Ứng viên '{c.candidate_id}' có direct_track=True nhưng thiếu hired_job_id."
+                    )
+                if hired_id not in job_ids:
+                    raise ValueError(
+                        f"Ứng viên '{c.candidate_id}' Direct Track trỏ tới vị trí không tồn tại: '{hired_id}'. "
+                        f"Danh sách vị trí hợp lệ: {sorted(job_ids)}"
+                    )
+                direct_hired_counts[hired_id] = direct_hired_counts.get(hired_id, 0) + 1
 
         # Tính quota thực tế còn lại cho từng vị trí (trừ Direct Track và filled_slots)
         quotas: dict[Id, int] = {}
         for job in jobs:
-            direct_filled = (
-                int(getattr(job, "filled_slots", 0))
-                + direct_hired_counts.get(job.job_id, 0)
-            )
-            quotas[job.job_id] = max(0, int(job.quota) - direct_filled)
+            direct_count = direct_hired_counts.get(job.job_id, 0)
+            filled = int(getattr(job, "filled_slots", 0))
+            total_pre_filled = direct_count + filled
+            if total_pre_filled > int(job.quota):
+                raise ValueError(
+                    f"Vị trí '{job.job_id}' có số lượng tuyển trực tiếp ({direct_count}) "
+                    f"cộng số chỗ đã lấp ngoài hệ thống ({filled}) = {total_pre_filled} "
+                    f"vượt quá hạn mức tuyển dụng (quota={job.quota})."
+                )
+            quotas[job.job_id] = int(job.quota) - total_pre_filled
 
         explanations: dict[tuple[Id, Id], str] = {}
         breakdowns: dict[tuple[Id, Id], dict[str, Any]] = {}

@@ -301,7 +301,7 @@ class TestHardConstraintsAndDirectTrack(unittest.TestCase):
 
     def test_direct_track_exclusion(self) -> None:
         """Ứng viên Direct Track (đã được nhận riêng) bị loại khỏi pool."""
-        cand = CandidateProfile(candidate_id="c1", direct_track=True)
+        cand = CandidateProfile(candidate_id="c1", direct_track=True, hired_job_id="j1")
         job = JobProfile(job_id="j1")
         is_feasible, reason = check_hard_constraints(cand, job)
         self.assertFalse(is_feasible)
