@@ -14,3 +14,10 @@ __pycache__/
 coverage.xml
 htmlcov/
 .coverage
+
+# Temporary / diagnostic files
+_*.txt
+_*.log
+_*.bat
+_watch.py
+_check_health.py

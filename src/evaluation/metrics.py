@@ -227,6 +227,14 @@ def find_blocking_pairs(
 
     blocking: list[tuple[Id, Id]] = []
 
+    # Kiểm tra tính chấp nhận được (Individual Rationality):
+    # Cả hai bên bắt buộc phải nằm trong danh sách ưu tiên của nhau.
+    for candidate, job in result.matches.items():
+        if job not in candidate_rank.get(candidate, {}):
+            blocking.append((candidate, job))
+        elif candidate not in job_rank.get(job, {}):
+            blocking.append((candidate, job))
+
     for candidate in profile.candidate_ids:
         current_job = result.matches.get(candidate)
         ranks = candidate_rank.get(candidate, {})
@@ -256,8 +264,10 @@ def find_blocking_pairs(
                     blocking.append((candidate, job))
 
             if max_pairs is not None and len(blocking) >= max_pairs:
+                result.is_stable = len(blocking) == 0
                 return blocking
 
+    result.is_stable = len(blocking) == 0
     return blocking
 
 

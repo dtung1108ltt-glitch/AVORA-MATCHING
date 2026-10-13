@@ -1,6 +1,0 @@
-
-INFO: No tasks running with the specified criteria.
-SUCCESS: The process with PID 5456 (child process of PID 29116) has been terminated.
-SUCCESS: The process with PID 40940 (child process of PID 27712) has been terminated.
-SUCCESS: The process with PID 29116 (child process of PID 27712) has been terminated.
-SUCCESS: The process with PID 27712 (child process of PID 30356) has been terminated.

@@ -488,10 +488,15 @@ class Preprocessor:
                     str(item[0]),
                 ),
             )
-            candidate_preferences[candidate] = tuple(job for job, _ in ordered)
+            candidate_preferences[candidate] = tuple(
+                job for job, _ in ordered if quotas_norm.get(job, 0) > 0
+            )
 
         job_preferences: dict[Id, tuple[Id, ...]] = {}
         for job in ordered_jobs:
+            if quotas_norm.get(job, 0) <= 0:
+                job_preferences[job] = ()
+                continue
             column: list[tuple[Id, float]] = [
                 (candidate, e_truncated[candidate][job])
                 for candidate in ordered_candidates
@@ -553,7 +558,24 @@ class Preprocessor:
         e_scores: dict[Id, dict[Id, float]] = {}
         c_scores: dict[Id, dict[Id, float]] = {}
         skill_scores: dict[Id, dict[Id, float]] = {}
-        quotas: dict[Id, int] = {job.job_id: max(1, int(job.quota)) for job in jobs}
+
+        # Thống kê số lượng ứng viên Direct Track đã được tuyển theo từng vị trí
+        direct_hired_counts: dict[Id, int] = {}
+        for c in candidates:
+            if c.direct_track and getattr(c, "hired_job_id", None):
+                direct_hired_counts[c.hired_job_id] = (
+                    direct_hired_counts.get(c.hired_job_id, 0) + 1
+                )
+
+        # Tính quota thực tế còn lại cho từng vị trí (trừ Direct Track và filled_slots)
+        quotas: dict[Id, int] = {}
+        for job in jobs:
+            direct_filled = (
+                int(getattr(job, "filled_slots", 0))
+                + direct_hired_counts.get(job.job_id, 0)
+            )
+            quotas[job.job_id] = max(0, int(job.quota) - direct_filled)
+
         explanations: dict[tuple[Id, Id], str] = {}
         breakdowns: dict[tuple[Id, Id], dict[str, Any]] = {}
         rejection_reasons: dict[tuple[Id, Id], str] = {}
@@ -568,6 +590,12 @@ class Preprocessor:
 
             for job in jobs:
                 j_id = job.job_id
+                if quotas.get(j_id, 0) <= 0:
+                    rejection_reasons[(c_id, j_id)] = (
+                        "Vị trí đã hết chỉ tiêu tuyển dụng (quota = 0)."
+                    )
+                    continue
+
                 feasible, reason = check_hard_constraints(cand, job)
                 if not feasible:
                     rejection_reasons[(c_id, j_id)] = reason

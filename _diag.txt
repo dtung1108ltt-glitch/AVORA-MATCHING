@@ -1,9 +1,0 @@
-===PORT8501=== 
-===PY=== 
-C:\Users\dtung\AppData\Local\Python\pythoncore-3.14-64\python.exe
-streamlit 1.64.0
-===WHERE=== 
-C:\Users\dtung\AppData\Local\Microsoft\WindowsApps\python.exe
-C:\Users\dtung\AppData\Local\Python\bin\python.exe
-C:\Users\dtung\AppData\Local\Python\pythoncore-3.14-64\Scripts\streamlit.exe
-===PROC=== 

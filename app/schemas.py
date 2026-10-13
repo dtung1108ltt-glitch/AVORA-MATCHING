@@ -351,6 +351,7 @@ class CandidateProfileInput(BaseModel):
     experience_years: float | None = Field(default=None, description="Số năm kinh nghiệm")
     career_orientation: list[float] | str | None = Field(default=None, description="Mục tiêu / định hướng nghề nghiệp")
     direct_track: bool = Field(default=False, description="True nếu đã trúng tuyển Direct Track (loại khỏi pool)")
+    hired_job_id: str | None = Field(default=None, description="ID vị trí đã trúng tuyển nếu là Direct Track")
     preferences: list[str] | None = Field(
         default=None,
         description="Danh sách ID công việc được sắp xếp theo thứ tự ưu tiên giảm dần của ứng viên"
@@ -382,7 +383,8 @@ class JobProfileInput(BaseModel):
     id: str = Field(default="", description="Định danh duy nhất của vị trí việc làm (ví dụ: 'J1', 'job_dev')")
     job_id: str | None = Field(default=None, description="Định danh vị trí (alias cho id)")
     title: str | None = Field(default=None, description="Tên hoặc chức danh công việc")
-    quota: int = Field(default=1, ge=1, description="Hạn mức tuyển dụng q_j: số lượng chỉ tiêu tối đa cho vị trí (Many-to-One)")
+    quota: int = Field(default=1, ge=0, description="Hạn mức tuyển dụng q_j: số lượng chỉ tiêu tối đa cho vị trí (Many-to-One, >= 0)")
+    filled_slots: int = Field(default=0, ge=0, description="Số lượng chỉ tiêu đã tuyển trước (ví dụ qua Direct Track)")
     vector_oxyz: Vector3D | None = Field(default=None, description="Tọa độ vector yêu cầu tuyển dụng trong không gian Oxyz")
     skills_required: list[float] | str | list[str] | None = Field(default=None, description="Kỹ năng yêu cầu")
     access_support_provided: list[str] | None = Field(default=None, description="Các điều kiện hỗ trợ tiếp cận cung cấp")

@@ -907,7 +907,20 @@ def run_stable_matching(request: StableMatchingRequest) -> StableMatchingRespons
 
     candidate_ids = [c.id for c in request.candidates]
     job_ids = [j.id for j in request.jobs]
-    quotas = {j.id: j.quota for j in request.jobs}
+
+    # Thống kê số lượng ứng viên Direct Track đã được tuyển theo từng vị trí
+    direct_hired_counts: dict[str, int] = {}
+    for c in request.candidates:
+        if c.direct_track and getattr(c, "hired_job_id", None):
+            direct_hired_counts[c.hired_job_id] = (
+                direct_hired_counts.get(c.hired_job_id, 0) + 1
+            )
+
+    # Tính quota thực tế còn lại cho từng vị trí
+    quotas = {}
+    for j in request.jobs:
+        direct_count = direct_hired_counts.get(j.id, 0) + getattr(j, "filled_slots", 0)
+        quotas[j.id] = max(0, int(j.quota) - direct_count)
 
     # -----------------------------------------------------------------------
     # GIAI ĐOẠN 1: Tính toán ma trận Điểm E và Điểm C
@@ -929,6 +942,11 @@ def run_stable_matching(request: StableMatchingRequest) -> StableMatchingRespons
         c_id = c.id
         for j in request.jobs:
             j_id = j.id
+
+            if quotas.get(j_id, 0) <= 0:
+                raw_e_matrix[c_id][j_id] = 0.0
+                raw_c_matrix[c_id][j_id] = 0.0
+                continue
 
             has_composite = (
                 c.skills is not None
@@ -955,11 +973,13 @@ def run_stable_matching(request: StableMatchingRequest) -> StableMatchingRespons
                     career_orientation=c.career_orientation or "",
                     disability_group=c.nhom_khuyet_tat,
                     direct_track=c.direct_track,
+                    hired_job_id=getattr(c, "hired_job_id", None),
                 )
                 job_prof = JobProfile(
                     job_id=j.id,
                     title=j.title or "",
                     quota=j.quota,
+                    filled_slots=getattr(j, "filled_slots", 0),
                     skills_required=j.skills_required or [],
                     access_support_provided=j.access_support_provided or [],
                     salary_min=j.salary_min or (j.salary_offered or 0.0),

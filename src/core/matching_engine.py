@@ -58,7 +58,8 @@ class MatchingResult:
         unmatched_jobs: Vị trí còn trống sau khi kết thúc.
         proposals: Tổng số lời đề nghị đã gửi (chỉ số đo chi phí tính toán).
         optimal: ``"candidate"`` hoặc ``"employer"``.
-        is_stable: Cờ khẳng định kết quả đã được kiểm chứng ổn định nội bộ.
+        is_stable: Cờ khẳng định kết quả đã được kiểm chứng ổn định (None nếu
+            chưa chạy kiểm chứng, True/False sau khi kiểm chứng).
     """
 
     matches: dict[Id, Id]
@@ -67,8 +68,22 @@ class MatchingResult:
     unmatched_jobs: list[Id]
     proposals: int
     optimal: str = "candidate"
-    is_stable: bool = True
+    is_stable: bool | None = None
     metadata: dict[str, object] = field(default_factory=dict)
+    _profile: PreferenceProfile | None = field(default=None, repr=False)
+
+    def verify_stability(self, profile: PreferenceProfile | None = None) -> bool:
+        """Kiểm chứng tính ổn định bằng cách tìm blocking pairs."""
+        from src.evaluation.metrics import find_blocking_pairs
+
+        target_profile = profile or self._profile
+        if target_profile is None:
+            raise ValueError(
+                "Cần cung cấp PreferenceProfile để kiểm chứng tính ổn định."
+            )
+        bps = find_blocking_pairs(target_profile, self)
+        self.is_stable = len(bps) == 0
+        return self.is_stable
 
     def matched_pair_count(self) -> int:
         """Số cặp đã ghép thành công."""
@@ -316,21 +331,20 @@ class GaleShapleyMatching:
             next_proposal[job] = index + 1
             proposals += 1
 
-            current_job = candidate_holder.get(candidate)
-            if current_job is None:
-                assigned[job].add(candidate)
-                candidate_holder[candidate] = job
-            else:
-                new_rank = self._cand_rank.get(candidate, {}).get(job)
-                current_rank = self._cand_rank.get(candidate, {}).get(current_job)
-                if new_rank is not None and (
-                    current_rank is None or new_rank < current_rank
-                ):
-                    # Ứng viên thích vị trí mới hơn -> trả vị trí cũ về hàng đợi.
-                    assigned[current_job].discard(candidate)
-                    free.append(current_job)
+            new_rank = self._cand_rank.get(candidate, {}).get(job)
+            if new_rank is not None:
+                current_job = candidate_holder.get(candidate)
+                if current_job is None:
                     assigned[job].add(candidate)
                     candidate_holder[candidate] = job
+                else:
+                    current_rank = self._cand_rank.get(candidate, {}).get(current_job)
+                    if current_rank is None or new_rank < current_rank:
+                        # Ứng viên thích vị trí mới hơn -> trả vị trí cũ về hàng đợi.
+                        assigned[current_job].discard(candidate)
+                        free.append(current_job)
+                        assigned[job].add(candidate)
+                        candidate_holder[candidate] = job
                 # Ngược lại: ứng viên từ chối vị trí mới, vị trí tiếp tục đề nghị.
 
             if (
@@ -392,11 +406,12 @@ class GaleShapleyMatching:
             unmatched_jobs=unmatched_jobs,
             proposals=proposals,
             optimal=optimal,
-            is_stable=True,
+            is_stable=None,
             metadata={
                 "matched_pairs": len(ordered_matches),
                 "total_quota": self.profile.total_quota(),
             },
+            _profile=self.profile,
         )
 
     def _assignment_view(self, matches: dict[Id, Id]) -> dict[Id, list[Id]]:

@@ -51,6 +51,7 @@ class CandidateProfile:
     career_orientation: list[float] | str = ""
     disability_group: str | None = None
     direct_track: bool = False
+    hired_job_id: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def get_salary_range(self) -> tuple[float, float]:
@@ -106,6 +107,7 @@ class JobProfile:
     job_id: str
     title: str = ""
     quota: int = 1
+    filled_slots: int = 0
     skills_required: list[float] | str | list[str] = field(default_factory=list)
     access_support_provided: list[str] = field(default_factory=list)
     salary_min: float = 0.0
@@ -117,6 +119,11 @@ class JobProfile:
     career_domain: list[float] | str = ""
     mandatory_requirements: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def remaining_quota(self) -> int:
+        """Số chỉ tiêu tuyển dụng thực tế còn lại cho batch matching."""
+        return max(0, int(self.quota) - int(self.filled_slots))
 
     def get_salary_range(self) -> tuple[float, float]:
         """Trả về khoảng lương chi trả (min, max)."""
