@@ -5,6 +5,7 @@ from collections import defaultdict
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, ORJSONResponse
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -81,6 +82,15 @@ app = FastAPI(
         "mô hình tính điểm không gian vector Oxyz, bộ lọc điều kiện tiên quyết (Hard Constraints) "
         "và hệ thống khuyến nghị việc làm dự phòng Top-K Recommendations."
     ),
+)
+
+# Cấu hình CORS cho phép Front-End Dashboard (Vite/Next.js) kết nối trực tiếp tới FastAPI Backend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -664,3 +674,29 @@ def database_stable_matching_endpoint(
     )
 
     return run_stable_matching(request)
+
+
+@app.post(
+    "/api/v1/matching/employer-proposing",
+    response_model=StableMatchingResponse,
+    tags=["Stable Matching Theory (Gale-Shapley)"],
+    summary="Thực thi Gale-Shapley chế độ Nhà tuyển dụng đề xuất (Employer-Proposing / J-Optimal)",
+)
+def employer_proposing_matching_endpoint(
+    request: StableMatchingRequest,
+) -> StableMatchingResponse:
+    """
+    Endpoint chuyên biệt dành cho Dashboard Nhà tuyển dụng / Admin (J-Optimal):
+    Nhận danh sách ứng viên, vị trí tuyển dụng và tiêu chí lọc cứng từ Front-End Dashboard,
+    ép buộc chế độ optimal='employer' (Employer-Proposing Deferred Acceptance) và trả về
+    kết quả ghép cặp ổn định tối ưu cho phía Nhà tuyển dụng kèm giải thích Explainable AI.
+    """
+    try:
+        employer_request = request.model_copy(update={"optimal": "employer"})
+        return run_stable_matching(employer_request)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        )
+

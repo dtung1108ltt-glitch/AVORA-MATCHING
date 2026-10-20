@@ -21,3 +21,12 @@ _*.log
 _*.bat
 _watch.py
 _check_health.py
+#Frontend
+node_modules/
+frontend/node_modules/
+frontend/dist/
+__pycache__/
+*.pyc
+.env
+.venv/
+venv/

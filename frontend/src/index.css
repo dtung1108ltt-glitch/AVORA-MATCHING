@@ -1,0 +1,55 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --focus-ring: #2563eb;
+  }
+
+  .dark {
+    --focus-ring: #60a5fa;
+  }
+
+  /* Chuẩn hóa Focus Ring rõ nét cho điều hướng bàn phím (WCAG 2.4.7 & 2.4.11) */
+  *:focus-visible {
+    outline: 3px solid var(--focus-ring) !important;
+    outline-offset: 2px !important;
+  }
+}
+
+/* Chế độ Tương phản cao (High Contrast Mode - WCAG AAA) cho người thị lực yếu */
+html.high-contrast body {
+  background-color: #000000 !important;
+  color: #ffffff !important;
+}
+
+html.high-contrast *:focus-visible {
+  outline: 4px solid #ffff00 !important;
+  outline-offset: 3px !important;
+}
+
+html.high-contrast .hc-surface {
+  background-color: #000000 !important;
+  color: #ffffff !important;
+  border: 2px solid #ffffff !important;
+  box-shadow: none !important;
+}
+
+html.high-contrast .hc-accent {
+  background-color: #ffff00 !important;
+  color: #000000 !important;
+  border: 2px solid #ffffff !important;
+  font-weight: 800 !important;
+}
+
+html.high-contrast .hc-badge-optimal {
+  background-color: #00ff66 !important;
+  color: #000000 !important;
+  border: 2px solid #ffffff !important;
+  font-weight: 800 !important;
+}
+
+html.high-contrast .hc-text-muted {
+  color: #ffee55 !important;
+}
