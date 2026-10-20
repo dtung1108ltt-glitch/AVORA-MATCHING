@@ -1,17 +1,32 @@
-fastapi==0.115.0            # framework viết API
-uvicorn[standard]==0.30.6   # server chạy FastAPI
-sqlalchemy==2.0.35          # ORM thao tác với PostgreSQL
-psycopg2-binary==2.9.9      # driver kết nối PostgreSQL
-pgvector==0.3.4             # kiểu dữ liệu Vector cho SQLAlchemy + pgvector
-sentence-transformers==3.1.1  # load model Qwen3-Embedding-0.6B để encode text
-# LƯU Ý: KHÔNG khai báo "torch" ở đây. Torch bản CPU đã được cài riêng ở bước
-# trước trong Dockerfile (RUN pip install torch --index-url .../cpu). Nếu khai
-# báo "torch==2.4.1" ở đây, pip sẽ thấy bản đã cài là "2.4.1+cpu" không khớp
-# tuyệt đối với "2.4.1" và tự tải lại bản CUDA mặc định từ PyPI (nặng ~2GB,
-# kéo theo nvidia-cudnn/cublas...), dễ gây timeout khi mạng chậm.
-pandas==2.2.3                # đọc/convert file Excel, CSV
-openpyxl==3.1.5              # engine đọc file .xlsx cho pandas
-pydantic==2.9.2               # validate dữ liệu request/response
-pydantic-settings==2.5.2      # đọc cấu hình từ file .env
-python-dotenv==1.0.1           # load biến môi trường từ .env
-requests==2.32.3                # gọi HTTP request tới API trong script ingest
+# Web Framework & High-Performance Serialization
+fastapi>=0.115.0            # framework viết API
+uvicorn[standard]>=0.30.6   # server chạy FastAPI
+orjson>=3.10.0              # tuần tự hóa JSON tốc độ cao (hỗ trợ trực tiếp numpy.ndarray)
+pydantic>=2.9.2             # validate dữ liệu request/response chuẩn Pydantic V2 (ConfigDict, TypeAdapter)
+pydantic-settings>=2.5.2    # đọc cấu hình từ file .env chuẩn Pydantic V2
+python-dotenv>=1.0.1        # load biến môi trường từ .env
+
+# JIT Compilation & Matrix Computing (Drop-in Algorithmic Acceleration)
+numpy>=1.26.0               # tính toán ma trận vector hóa
+numba>=0.60.0               # biên dịch JIT mã máy (@numba.njit) cho chấm điểm và Gale-Shapley
+
+# Lightweight Embedding Inference (ONNX Runtime & FastEmbed - Không phụ thuộc PyTorch/CUDA)
+onnxruntime>=1.19.0         # thực thi mô hình ngôn ngữ định dạng .onnx (hỗ trợ INT8/FP16)
+fastembed>=0.4.0            # sinh vector nhúng tốc độ cao trên CPU qua ONNX Runtime
+
+# Vector Database & Async Relational Database
+qdrant-client>=1.12.0       # AsyncQdrantClient hỗ trợ giao thức gRPC (port 6334) và Payload Indexing
+sqlalchemy[asyncio]>=2.0.35 # ORM bất đồng bộ SQLAlchemy 2.0 (create_async_engine)
+asyncpg>=0.30.0             # driver PostgreSQL bất đồng bộ hiệu năng cao
+psycopg2-binary>=2.9.9      # driver đồng bộ tương thích ngược
+pgvector>=0.3.4             # kiểu dữ liệu Vector cho SQLAlchemy + pgvector
+
+# High-Speed Columnar ETL (Apache Arrow & Rust Calamine)
+polars>=1.9.0               # xử lý dữ liệu đa luồng dựa trên chuẩn bộ nhớ cột Apache Arrow
+fastexcel>=0.11.6           # engine calamine đọc file Excel (.xlsx) tốc độ cao cho Polars
+pandas>=2.2.3               # tương thích ngược cho các công cụ phân tích/kiểm thử
+openpyxl>=3.1.5             # tương thích ngược đọc/ghi Excel
+
+# HTTP Client Utilities
+requests>=2.32.3            # gọi HTTP request tới API trong script ingest
+httpx>=0.27.0               # async HTTP client & FastAPI TestClient

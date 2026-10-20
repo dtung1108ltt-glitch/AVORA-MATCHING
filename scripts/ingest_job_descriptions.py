@@ -3,31 +3,20 @@
 """
 ingest_job_descriptions.py
 
-Đọc file CSV có đúng 2 cột:
+Đọc file CSV có đúng 2 cột bằng Polars scan_csv (Apache Arrow):
 - Nhóm khuyết tật
 - Mô tả công việc
 
 Sau đó gửi từng dòng tới:
     POST http://localhost:8000/job-descriptions
-
-Payload:
-    {
-        "nhom_khuyet_tat": "Khiếm thính",
-        "mo_ta_cong_viec": "Nhập và đối chiếu dữ liệu trên Excel..."
-    }
-
-Backend chịu trách nhiệm:
-1. Nhận nhóm khuyết tật và mô tả công việc.
-2. Chuyển riêng mo_ta_cong_viec thành embedding với is_query=False.
-3. Lưu nhóm, mô tả và vector vào PostgreSQL/pgvector.
-
-Dữ liệu CSV không chứa vector.
+hoặc nạp song song theo lô vào Qdrant qua gRPC (`upload_points(..., parallel=4)`).
 """
 
 from __future__ import annotations
 
 import argparse
-import csv
+import asyncio
+import hashlib
 import sys
 import time
 import unicodedata
@@ -35,11 +24,14 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+import polars as pl
 import requests
+from qdrant_client import AsyncQdrantClient
+from qdrant_client.models import PointStruct
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-DEFAULT_CSV_PATH = Path(__file__).resolve().parent / "data" / "job_descriptions.csv"
+DEFAULT_CSV_PATH = Path("scripts/data/job_descriptions.csv")
 DEFAULT_API_URL = "http://localhost:8000/job-descriptions"
 DEFAULT_TIMEOUT = 120.0
 DEFAULT_PROGRESS_EVERY = 25
@@ -85,93 +77,159 @@ def create_session() -> requests.Session:
 
 
 def read_job_descriptions(
-    csv_path: Path,
-    min_description_length: int,
+    csv_path: Path = Path("scripts/data/job_descriptions.csv"),
+    min_description_length: int = 50,
 ) -> tuple[list[dict[str, str]], list[str]]:
     """
-    Đọc và kiểm tra file CSV.
+    Đọc và kiểm tra file CSV bằng ``pl.scan_csv("scripts/data/job_descriptions.csv")`` (Apache Arrow).
 
     Trả về:
     - payload hợp lệ để gửi API
     - danh sách cảnh báo cho các dòng bị bỏ qua
     """
-    if not csv_path.exists():
+    resolved_path = csv_path if csv_path.exists() else (Path(__file__).resolve().parent.parent / csv_path)
+    if not resolved_path.exists():
         raise FileNotFoundError(f"Không tìm thấy file CSV: {csv_path}")
-    if not csv_path.is_file():
+    if not resolved_path.is_file():
         raise ValueError(f"Đường dẫn không phải file: {csv_path}")
+
+    lf = pl.scan_csv(resolved_path, encoding="utf8", infer_schema_length=0)
+    original_headers = lf.collect_schema().names()
+    normalized_headers = [normalize_text(header.lstrip("\ufeff")) for header in original_headers]
+    expected_headers = [CSV_GROUP_COLUMN, CSV_DESCRIPTION_COLUMN]
+
+    missing = [x for x in expected_headers if x not in normalized_headers]
+    extra = [x for x in normalized_headers if x not in expected_headers]
+
+    if missing:
+        raise ValueError(
+            "CSV thiếu cột bắt buộc: "
+            + ", ".join(missing)
+            + f". Header hiện tại: {normalized_headers}"
+        )
+    if extra:
+        raise ValueError(
+            "CSV phải có đúng 2 cột. Cột thừa: " + ", ".join(extra)
+        )
+
+    header_map = {
+        normalize_text(original.lstrip("\ufeff")): original
+        for original in original_headers
+    }
+
+    df = (
+        lf.select([
+            pl.col(header_map[CSV_GROUP_COLUMN])
+            .cast(pl.Utf8)
+            .fill_null("")
+            .str.replace_all(r"\s+", " ")
+            .str.strip_chars()
+            .alias("nhom_khuyet_tat"),
+            pl.col(header_map[CSV_DESCRIPTION_COLUMN])
+            .cast(pl.Utf8)
+            .fill_null("")
+            .str.replace_all(r"\s+", " ")
+            .str.strip_chars()
+            .alias("mo_ta_cong_viec"),
+        ])
+        .collect()
+    )
 
     payloads: list[dict[str, str]] = []
     warnings: list[str] = []
     seen_pairs: set[tuple[str, str]] = set()
 
-    with csv_path.open("r", encoding="utf-8-sig", newline="") as file:
-        reader = csv.DictReader(file)
-        original_headers = reader.fieldnames or []
-        normalized_headers = [normalize_text(header) for header in original_headers]
-        expected_headers = [CSV_GROUP_COLUMN, CSV_DESCRIPTION_COLUMN]
+    for line_number, (raw_group, raw_desc) in enumerate(
+        zip(df["nhom_khuyet_tat"].to_list(), df["mo_ta_cong_viec"].to_list(), strict=True),
+        start=2,
+    ):
+        group = normalize_text(raw_group)
+        description = normalize_text(raw_desc)
 
-        missing = [x for x in expected_headers if x not in normalized_headers]
-        extra = [x for x in normalized_headers if x not in expected_headers]
-
-        if missing:
-            raise ValueError(
-                "CSV thiếu cột bắt buộc: "
-                + ", ".join(missing)
-                + f". Header hiện tại: {normalized_headers}"
+        if not group and not description:
+            warnings.append(f"Dòng {line_number}: dòng trống, đã bỏ qua.")
+            continue
+        if not group:
+            warnings.append(
+                f"Dòng {line_number}: thiếu Nhóm khuyết tật, đã bỏ qua."
             )
-        if extra:
-            raise ValueError(
-                "CSV phải có đúng 2 cột. Cột thừa: " + ", ".join(extra)
+            continue
+        if group not in ALLOWED_GROUPS:
+            warnings.append(
+                f"Dòng {line_number}: nhóm không hợp lệ '{group}', đã bỏ qua."
             )
+            continue
+        if not description:
+            warnings.append(
+                f"Dòng {line_number} ({group}): thiếu Mô tả công việc, đã bỏ qua."
+            )
+            continue
+        if len(description) < min_description_length:
+            warnings.append(
+                f"Dòng {line_number} ({group}): mô tả chỉ có "
+                f"{len(description)} ký tự, ngắn hơn {min_description_length}, đã bỏ qua."
+            )
+            continue
 
-        header_map = {
-            normalize_text(original): original
-            for original in original_headers
-        }
+        pair = (group.casefold(), description.casefold())
+        if pair in seen_pairs:
+            warnings.append(
+                f"Dòng {line_number} ({group}): trùng cặp nhóm và mô tả, đã bỏ qua."
+            )
+            continue
+        seen_pairs.add(pair)
 
-        for line_number, row in enumerate(reader, start=2):
-            group = normalize_text(row.get(header_map[CSV_GROUP_COLUMN]))
-            description = normalize_text(row.get(header_map[CSV_DESCRIPTION_COLUMN]))
-
-            if not group and not description:
-                warnings.append(f"Dòng {line_number}: dòng trống, đã bỏ qua.")
-                continue
-            if not group:
-                warnings.append(
-                    f"Dòng {line_number}: thiếu Nhóm khuyết tật, đã bỏ qua."
-                )
-                continue
-            if group not in ALLOWED_GROUPS:
-                warnings.append(
-                    f"Dòng {line_number}: nhóm không hợp lệ '{group}', đã bỏ qua."
-                )
-                continue
-            if not description:
-                warnings.append(
-                    f"Dòng {line_number} ({group}): thiếu Mô tả công việc, đã bỏ qua."
-                )
-                continue
-            if len(description) < min_description_length:
-                warnings.append(
-                    f"Dòng {line_number} ({group}): mô tả chỉ có "
-                    f"{len(description)} ký tự, ngắn hơn {min_description_length}, đã bỏ qua."
-                )
-                continue
-
-            pair = (group.casefold(), description.casefold())
-            if pair in seen_pairs:
-                warnings.append(
-                    f"Dòng {line_number} ({group}): trùng cặp nhóm và mô tả, đã bỏ qua."
-                )
-                continue
-            seen_pairs.add(pair)
-
-            payloads.append({
-                "nhom_khuyet_tat": group,
-                "mo_ta_cong_viec": description,
-            })
+        payloads.append({
+            "nhom_khuyet_tat": group,
+            "mo_ta_cong_viec": description,
+        })
 
     return payloads, warnings
+
+
+async def upload_job_descriptions_to_qdrant(
+    payloads: list[dict[str, str]],
+    *,
+    collection_name: str = "avora_job_descriptions",
+    host: str = "localhost",
+    grpc_port: int = 6334,
+    batch_size: int = 64,
+    parallel: int = 4,
+) -> int:
+    """Sinh embedding theo lô động và nạp điểm vào Qdrant qua gRPC với upload_points(parallel=4)."""
+    from app.embeddings import get_embeddings_batch
+
+    client = AsyncQdrantClient(host=host, grpc_port=grpc_port, prefer_grpc=True)
+    try:
+        texts = [item["mo_ta_cong_viec"] for item in payloads]
+        vectors = get_embeddings_batch(texts, is_query=False)
+        points: list[PointStruct] = []
+        for idx, (item, vec) in enumerate(zip(payloads, vectors, strict=True), start=1):
+            digest = hashlib.sha256(
+                f"{item['nhom_khuyet_tat']}|{item['mo_ta_cong_viec']}".encode("utf-8")
+            ).digest()
+            point_id = int.from_bytes(digest[:8], "big") & 0x7FFF_FFFF_FFFF_FFFF
+            points.append(
+                PointStruct(
+                    id=point_id or idx,
+                    vector=vec,
+                    payload={
+                        "job_index": idx,
+                        "nhom_khuyet_tat": item["nhom_khuyet_tat"],
+                        "mo_ta_cong_viec": item["mo_ta_cong_viec"],
+                    },
+                )
+            )
+        client.upload_points(
+            collection_name=collection_name,
+            points=points,
+            batch_size=batch_size,
+            parallel=parallel,
+            wait=True,
+        )
+        return len(points)
+    finally:
+        await client.close()
 
 
 def api_base_url(api_url: str) -> str:
@@ -394,6 +452,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Chỉ kiểm tra CSV và in payload mẫu, không gọi API.",
     )
+    parser.add_argument(
+        "--qdrant",
+        action="store_true",
+        help="Nạp song song trực tiếp vào Qdrant qua gRPC (parallel=4).",
+    )
     return parser.parse_args()
 
 
@@ -440,9 +503,14 @@ def main() -> int:
     print(f"Đã đọc {len(payloads)} cặp nhóm và mô tả hợp lệ từ {args.csv}")
     print(f"Số mô tả công việc duy nhất: {unique_description_count}")
     print(
-        "Lưu ý: nếu một mô tả thuộc nhiều nhóm, backend hiện tại sẽ "
-        "tạo lại cùng vector cho từng nhóm."
+        "Lưu ý: nếu một mô tả thuộc nhiều nhóm, bộ nhớ đệm SHA-256 trong "
+        "app/embeddings.py sẽ tái sử dụng ngay vector cho mô tả trùng lặp."
     )
+
+    if args.qdrant and not args.dry_run:
+        uploaded = asyncio.run(upload_job_descriptions_to_qdrant(payloads, parallel=4))
+        print(f"Đã upload {uploaded} bản ghi mô tả công việc lên Qdrant (parallel=4).")
+        return 0
 
     try:
         stats = ingest(

@@ -1,0 +1,17 @@
+[33mcommit 8761626408a7b3e6a0c5f306b0349358a16ceae4[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m)[m
+Author: dtung1108ltt-glitch <dtung1108ltt@gmail.com>
+Date:   Tue Oct 13 21:08:35 2026 +0700
+
+    fix: validate Direct Track edge cases (422) and clarify filled_slots
+
+ README.md                                  |  12 [32m++[m
+ app/main.py                                |  20 [32m+[m[31m-[m
+ app/matching.py                            |  41 [32m+++[m[31m-[m
+ app/schemas.py                             |  68 [32m+++++[m[31m-[m
+ document-tech.md                           |  51 [32m++++[m[31m-[m
+ src/core/preprocessor.py                   |  34 [32m++[m[31m-[m
+ src/core/profile_models.py                 |  22 [32m++[m
+ tests/test_enhanced_matching.py            |   2 [32m+[m[31m-[m
+ tests/test_exhaustive_stability_checker.py | 327 [32m+++++++++++++++++++++++++++++[m
+ tests/test_regression_fixes.py             | 112 [32m++++++++++[m
+ 10 files changed, 667 insertions(+), 22 deletions(-)

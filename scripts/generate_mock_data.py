@@ -1,32 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Tạo database gồm đúng 2 cột:
+Tạo database gồm đúng 2 cột sử dụng Polars:
 - Nhóm khuyết tật
 - Mô tả công việc
 
-Mỗi dòng là một cặp:
-    nhóm khuyết tật <-> mô tả công việc có thể phù hợp
-
-Một mô tả có thể xuất hiện nhiều dòng nếu phù hợp với nhiều nhóm.
 Output mặc định: scripts/data/job_descriptions.csv
 """
 
 from __future__ import annotations
 
 import argparse
-import csv
 import random
 import re
 import sys
 import unicodedata
 from pathlib import Path
 
+import polars as pl
+
 DEFAULT_OUTPUT = Path(__file__).resolve().parent / "data" / "job_descriptions.csv"
 DEFAULT_COUNT = 100
 DEFAULT_SEED = 42
 
-# Mỗi mẫu chỉ chứa nội dung cần cho embedding và các nhóm được gắn nhãn.
 JOB_TEMPLATES = [
     {
         "tasks": "Nhập, đối chiếu và cập nhật dữ liệu trên Excel hoặc phần mềm nội bộ; kiểm tra lỗi trước khi lưu",
@@ -192,7 +188,6 @@ def generate_rows(unique_descriptions: int, rng: random.Random) -> list[dict[str
             continue
         seen.add(key)
 
-        # Một mô tả có thể tạo nhiều dòng, mỗi dòng ứng với một nhóm.
         for group in template["groups"]:
             rows.append({
                 "Nhóm khuyết tật": group,
@@ -239,13 +234,8 @@ def validate_rows(rows: list[dict[str, str]], expected_descriptions: int) -> Non
 
 def write_csv(path: Path, rows: list[dict[str, str]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="", encoding="utf-8-sig") as file:
-        writer = csv.DictWriter(
-            file,
-            fieldnames=["Nhóm khuyết tật", "Mô tả công việc"],
-        )
-        writer.writeheader()
-        writer.writerows(rows)
+    df = pl.DataFrame(rows, schema=["Nhóm khuyết tật", "Mô tả công việc"])
+    df.write_csv(path, include_bom=True)
 
 
 def parse_args() -> argparse.Namespace:

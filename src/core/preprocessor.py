@@ -37,10 +37,13 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import unicodedata
 from collections.abc import Hashable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TypeAlias
+
+import polars as pl
 
 from src.core.profile_models import CandidateProfile, ExecutionAudit, JobProfile
 from src.core.scoring import (
@@ -57,6 +60,128 @@ Id: TypeAlias = Hashable
 
 #: Ma trận điểm thưa, luôn đánh chỉ số ``[candidate][job]``.
 ScoreMatrix: TypeAlias = dict[Id, dict[Id, float]]
+
+#: Từ điển chuẩn hóa từ đồng nghĩa kỹ năng phục vụ biểu thức vector hóa Polars.
+SKILL_SYNONYM_MAP: dict[str, str] = {
+    "js": "javascript",
+    "ts": "typescript",
+    "py": "python",
+    "reactjs": "react",
+    "nodejs": "node.js",
+    "postgres": "postgresql",
+    "ms excel": "excel",
+    "microsoft excel": "excel",
+    "ms word": "word",
+    "microsoft word": "word",
+}
+
+#: Bảng chuẩn hóa trình độ học vấn (thang điểm 0..5).
+EDUCATION_LEVEL_MAP: dict[str, int] = {
+    "khong yeu cau": 0,
+    "không yêu cầu": 0,
+    "thcs": 1,
+    "trung học cơ sở": 1,
+    "thpt": 2,
+    "trung học phổ thông": 2,
+    "trung cap": 2,
+    "trung cấp": 2,
+    "cao dang": 3,
+    "cao đẳng": 3,
+    "dai hoc": 4,
+    "đại học": 4,
+    "cu nhan": 4,
+    "cử nhân": 4,
+    "ky su": 4,
+    "kỹ sư": 4,
+    "thac si": 5,
+    "thạc sĩ": 5,
+    "tien si": 5,
+    "tiến sĩ": 5,
+}
+
+
+def normalize_text_for_embedding(text: str | None) -> str:
+    """Làm sạch và chuẩn hóa văn bản đầu vào (Unicode NFC + chuẩn hóa khoảng trắng).
+
+    Hàm này được sử dụng thống nhất giữa tầng tiền xử lý và bộ nhớ đệm
+    SHA-256 Embedding Cache trong ``app/embeddings.py``.
+    """
+    if not text:
+        return ""
+    normalized = unicodedata.normalize("NFC", str(text))
+    return " ".join(normalized.split())
+
+
+def preprocess_dataframe_polars(
+    df: pl.DataFrame | pl.LazyFrame,
+    *,
+    text_columns: Sequence[str] = (),
+    skills_column: str | None = "skills",
+    education_column: str | None = None,
+    experience_column: str | None = None,
+    skill_delimiter: str = ",",
+) -> pl.DataFrame | pl.LazyFrame:
+    """Tiền xử lý bảng dữ liệu ứng viên / công việc bằng biểu thức vector hóa Polars.
+
+    Giữ nguyên 100% quy tắc làm sạch văn bản, tách kỹ năng, chuẩn hóa từ đồng nghĩa
+    và chuẩn hóa học vấn/kinh nghiệm, nhưng thực thi hoàn toàn trên Polars / Apache Arrow
+    thay vì vòng lặp ``for`` hay ``.apply()``.
+    """
+    schema_names = df.collect_schema().names() if isinstance(df, pl.LazyFrame) else df.columns
+    exprs: list[pl.Expr] = []
+
+    for col_name in text_columns:
+        if col_name in schema_names:
+            exprs.append(
+                pl.col(col_name)
+                .cast(pl.Utf8)
+                .fill_null("")
+                .str.replace_all(r"\s+", " ")
+                .str.strip_chars()
+                .alias(col_name)
+            )
+
+    if skills_column and skills_column in schema_names:
+        exprs.append(
+            pl.col(skills_column)
+            .cast(pl.Utf8)
+            .fill_null("")
+            .str.to_lowercase()
+            .str.split(skill_delimiter)
+            .list.eval(
+                pl.element()
+                .str.replace_all(r"\s+", " ")
+                .str.strip_chars()
+                .replace(SKILL_SYNONYM_MAP)
+            )
+            .list.eval(pl.element().filter(pl.element() != ""))
+            .alias(f"{skills_column}_normalized")
+        )
+
+    if education_column and education_column in schema_names:
+        exprs.append(
+            pl.col(education_column)
+            .cast(pl.Utf8)
+            .fill_null("")
+            .str.to_lowercase()
+            .str.strip_chars()
+            .replace_strict(EDUCATION_LEVEL_MAP, default=0)
+            .cast(pl.Int32)
+            .alias(f"{education_column}_normalized")
+        )
+
+    if experience_column and experience_column in schema_names:
+        exprs.append(
+            pl.col(experience_column)
+            .cast(pl.Float64, strict=False)
+            .fill_null(0.0)
+            .clip(lower_bound=0.0)
+            .alias(f"{experience_column}_normalized")
+        )
+
+    if not exprs:
+        return df
+    return df.with_columns(exprs)
 
 
 def stable_hash(*parts: object, seed: int = 0) -> int:
@@ -280,7 +405,7 @@ def truncate_preferences(
     raise ValueError("by phải là 'candidate' hoặc 'job'.")
 
 
-@dataclass
+@dataclass(slots=True)
 class PreprocessConfig:
     """Tham số tiền xử lý.
 
@@ -305,7 +430,7 @@ class PreprocessConfig:
     use_skill_tie_break: bool = True
 
 
-@dataclass
+@dataclass(slots=True)
 class PreferenceProfile:
     """Hồ sơ ưu tiên đã tiền xử lý - đầu vào của Gale-Shapley engine.
 
@@ -332,7 +457,6 @@ class PreferenceProfile:
     job_preferences: dict[Id, tuple[Id, ...]]
     tie_break_seed: int = 20_240_517
     metadata: dict[str, object] = field(default_factory=dict)
-
 
     def total_quota(self) -> int:
         """Tổng hạn mức của toàn bộ vị trí tuyển dụng."""
@@ -650,7 +774,6 @@ class Preprocessor:
         )
         return profile, explanations, breakdowns
 
-
     @staticmethod
     def _normalize_quotas(quotas: Mapping[Id, int]) -> dict[Id, int]:
         """Chuẩn hóa quota về ``dict[job] -> int``.
@@ -693,8 +816,7 @@ def build_profile_from_profiles(
 
 
 # ---------------------------------------------------------------------------
-
-# Adapter kế thừa dữ liệu CSV hiện có của repo
+# Adapter kế thừa dữ liệu CSV hiện có của repo (Nâng cấp Polars scan_csv)
 # ---------------------------------------------------------------------------
 
 CANDIDATE_NAME_COLUMN = "Họ và tên"
@@ -714,30 +836,9 @@ def load_market_from_csv(
 ) -> tuple[ScoreMatrix, ScoreMatrix, dict[Id, int], set[tuple[Id, Id]]]:
     """Kế thừa dữ liệu CSV hiện có để tạo ma trận ``E``, ``C`` và quota.
 
-    File ``candidates.csv`` có cột *Họ và tên*, *Nhóm khuyết tật*; file
-    ``job_descriptions.csv`` có cột *Nhóm khuyết tật*, *Mô tả công việc*.
-
-    Vì dữ liệu hiện tại **chưa có điểm số thực**, adapter sinh điểm mô phỏng
-    tất định (deterministic) từ hàm băm để phục vụ benchmark; khi lên
-    production, ``E`` sẽ đến từ pipeline embedding kỹ năng và ``C`` từ tín hiệu
-    sở thích của ứng viên. Hard Constraint bắt buộc: nhóm khuyết tật của ứng
-    viên phải trùng nhóm gắn với mô tả công việc.
-
-    Args:
-        candidates_csv: Đường dẫn ``candidates.csv``.
-        job_descriptions_csv: Đường dẫn ``job_descriptions.csv``.
-        default_quota: Hạn mức mặc định cho mỗi dòng mô tả công việc.
-        seed: Hạt giống sinh điểm mô phỏng.
-        candidate_limit: Giới hạn số ứng viên đọc vào (``None`` = tất cả).
-        job_limit: Giới hạn số dòng mô tả công việc đọc vào.
-
-    Returns:
-        ``(e_scores, c_scores, quotas, feasible_pairs)`` sẵn sàng truyền vào
-        ``Preprocessor.build_profile``.
-
-    Raises:
-        FileNotFoundError: Nếu thiếu file CSV.
-        ValueError: Nếu thiếu cột bắt buộc.
+    Sử dụng ``polars.scan_csv`` dựa trên bộ nhớ cột Apache Arrow và biểu thức
+    chuỗi vector hóa, đồng thời bảo toàn 100% chỉ số định danh ``C{index}`` /
+    ``J{index}`` và điểm mô phỏng tất định ``_mock_score``.
     """
 
     candidates_path = Path(candidates_csv)
@@ -747,42 +848,86 @@ def load_market_from_csv(
     if not jobs_path.is_file():
         raise FileNotFoundError(f"Không tìm thấy file mô tả công việc: {jobs_path}")
 
-    candidates: list[tuple[Id, str]] = []
-    with candidates_path.open("r", encoding="utf-8-sig", newline="") as handle:
-        reader = csv.DictReader(handle)
-        headers = reader.fieldnames or []
-        if CANDIDATE_GROUP_COLUMN not in headers:
-            raise ValueError(
-                f"CSV ứng viên thiếu cột '{CANDIDATE_GROUP_COLUMN}': {headers}"
-            )
-        name_key = (
-            CANDIDATE_NAME_COLUMN
-            if CANDIDATE_NAME_COLUMN in headers
-            else headers[0]
+    cand_lf = pl.scan_csv(candidates_path, encoding="utf8", infer_schema_length=0)
+    cand_headers = [col.lstrip("\ufeff") for col in cand_lf.collect_schema().names()]
+    if CANDIDATE_GROUP_COLUMN not in cand_headers:
+        raise ValueError(
+            f"CSV ứng viên thiếu cột '{CANDIDATE_GROUP_COLUMN}': {cand_headers}"
         )
-        for index, row in enumerate(reader):
-            if candidate_limit is not None and index >= candidate_limit:
-                break
-            group = (row.get(CANDIDATE_GROUP_COLUMN) or "").strip()
-            if not group:
-                continue
-            candidates.append((f"C{index}", group))
 
-    jobs: list[tuple[Id, str]] = []
-    with jobs_path.open("r", encoding="utf-8-sig", newline="") as handle:
-        reader = csv.DictReader(handle)
-        headers = reader.fieldnames or []
-        if JOB_GROUP_COLUMN not in headers:
-            raise ValueError(
-                f"CSV mô tả công việc thiếu cột '{JOB_GROUP_COLUMN}': {headers}"
-            )
-        for index, row in enumerate(reader):
-            if job_limit is not None and index >= job_limit:
-                break
-            group = (row.get(JOB_GROUP_COLUMN) or "").strip()
-            if not group:
-                continue
-            jobs.append((f"J{index}", group))
+    # Chuẩn hóa tên cột nếu có BOM
+    cand_rename = {
+        raw_col: raw_col.lstrip("\ufeff")
+        for raw_col in cand_lf.collect_schema().names()
+        if raw_col != raw_col.lstrip("\ufeff")
+    }
+    if cand_rename:
+        cand_lf = cand_lf.rename(cand_rename)
+
+    cand_lf = cand_lf.with_row_index("row_idx")
+    if candidate_limit is not None:
+        cand_lf = cand_lf.slice(0, max(0, candidate_limit))
+
+    cand_df = (
+        cand_lf.with_columns(
+            pl.col(CANDIDATE_GROUP_COLUMN)
+            .cast(pl.Utf8)
+            .fill_null("")
+            .str.strip_chars()
+            .alias("_clean_group")
+        )
+        .filter(pl.col("_clean_group") != "")
+        .select(["row_idx", "_clean_group"])
+        .collect()
+    )
+    candidates: list[tuple[Id, str]] = [
+        (f"C{row_idx}", group)
+        for row_idx, group in zip(
+            cand_df["row_idx"].to_list(),
+            cand_df["_clean_group"].to_list(),
+            strict=True,
+        )
+    ]
+
+    job_lf = pl.scan_csv(jobs_path, encoding="utf8", infer_schema_length=0)
+    job_headers = [col.lstrip("\ufeff") for col in job_lf.collect_schema().names()]
+    if JOB_GROUP_COLUMN not in job_headers:
+        raise ValueError(
+            f"CSV mô tả công việc thiếu cột '{JOB_GROUP_COLUMN}': {job_headers}"
+        )
+
+    job_rename = {
+        raw_col: raw_col.lstrip("\ufeff")
+        for raw_col in job_lf.collect_schema().names()
+        if raw_col != raw_col.lstrip("\ufeff")
+    }
+    if job_rename:
+        job_lf = job_lf.rename(job_rename)
+
+    job_lf = job_lf.with_row_index("row_idx")
+    if job_limit is not None:
+        job_lf = job_lf.slice(0, max(0, job_limit))
+
+    job_df = (
+        job_lf.with_columns(
+            pl.col(JOB_GROUP_COLUMN)
+            .cast(pl.Utf8)
+            .fill_null("")
+            .str.strip_chars()
+            .alias("_clean_group")
+        )
+        .filter(pl.col("_clean_group") != "")
+        .select(["row_idx", "_clean_group"])
+        .collect()
+    )
+    jobs: list[tuple[Id, str]] = [
+        (f"J{row_idx}", group)
+        for row_idx, group in zip(
+            job_df["row_idx"].to_list(),
+            job_df["_clean_group"].to_list(),
+            strict=True,
+        )
+    ]
 
     e_scores: ScoreMatrix = {}
     c_scores: ScoreMatrix = {}

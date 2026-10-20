@@ -1,42 +1,62 @@
 version: "3.9"
 
 services:
-  # Service database: PostgreSQL 16 kèm sẵn extension pgvector
+  # Service database quan hệ: PostgreSQL 16 kèm sẵn extension pgvector
   db:
-    image: pgvector/pgvector:pg16   # image PostgreSQL đã cài sẵn pgvector
-    restart: unless-stopped          # tự khởi động lại nếu container bị crash
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: avora            # username DB
-      POSTGRES_PASSWORD: avora        # password DB
-      POSTGRES_DB: avora_matching     # tên database sẽ tạo
+      POSTGRES_USER: avora
+      POSTGRES_PASSWORD: avora
+      POSTGRES_DB: avora_matching
     ports:
-      - "5432:5432"                   # mở cổng để có thể connect từ máy host khi cần debug
+      - "5432:5432"
     volumes:
-      - pgdata:/var/lib/postgresql/data   # lưu data ra volume, không mất khi container restart
-    healthcheck:                       # kiểm tra DB đã sẵn sàng nhận connection chưa
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
       test: ["CMD-SHELL", "pg_isready -U avora"]
       interval: 5s
       timeout: 5s
       retries: 5
 
-  # Service web: FastAPI app, tự tính embedding và gọi DB
+  # Service Vector Database: Qdrant hỗ trợ Filterable HNSW và gRPC (cổng 6334)
+  qdrant:
+    image: qdrant/qdrant:latest
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    environment:
+      QDRANT__SERVICE__GRPC_PORT: "6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  # Service web: FastAPI app với ORJSONResponse, ONNX/FastEmbed, AsyncQdrantClient & asyncpg
   web:
-    build: .                          # build từ Dockerfile trong thư mục hiện tại
+    build: .
     restart: unless-stopped
     depends_on:
       db:
-        condition: service_healthy    # chỉ start web sau khi db đã "healthy"
+        condition: service_healthy
+      qdrant:
+        condition: service_started
     environment:
-      DATABASE_URL: postgresql://avora:avora@db:5432/avora_matching  # chuỗi kết nối tới service db
-      EMBEDDING_MODEL_NAME: Qwen/Qwen3-Embedding-0.6B   # tên model embedding dùng chung cho toàn bộ flow
-      VECTOR_DIM: "1024"               # số chiều vector của Qwen3-Embedding-0.6B
-      TOP_K_JOBS: "10"                 # số job giống nhất lấy ra để bầu chọn nhóm phù hợp
-      TOP_K_CANDIDATES: "20"           # số ứng viên tối đa trả về trong 1 lần match
+      DATABASE_URL: postgresql+asyncpg://avora:avora@db:5432/avora_matching
+      QDRANT_HOST: qdrant
+      QDRANT_HTTP_PORT: "6333"
+      QDRANT_GRPC_PORT: "6334"
+      QDRANT_PREFER_GRPC: "true"
+      EMBEDDING_MODEL_NAME: Qwen/Qwen3-Embedding-0.6B
+      VECTOR_DIM: "1024"
+      TOP_K_JOBS: "10"
+      TOP_K_CANDIDATES: "20"
     ports:
-      - "8000:8000"                    # expose API ra ngoài
+      - "8000:8000"
     volumes:
-      - ./app:/code/app                # mount code để dev tiện sửa mà không cần build lại image
+      - ./app:/code/app
+      - ./src:/code/src
       - ./scripts:/code/scripts
 
 volumes:
-  pgdata:   # volume Docker lưu dữ liệu Postgres bền vững
+  pgdata:
+  qdrant_data:

@@ -2131,3 +2131,34 @@ Trong quá trình đánh giá và thực nghiệm hệ thống, một số quan 
 
 
 
+
+---
+
+# 19. Kiến trúc Tối ưu hóa Hạ tầng & Công nghệ (Drop-in Infrastructure Upgrade)
+
+Hệ thống đã được nâng cấp toàn diện theo nguyên tắc **Zero-Algorithmic-Change Guarantee** (bảo toàn 100% công thức chấm điểm, thứ tự ghép cặp Gale-Shapley và quy tắc tiền xử lý/hậu xử lý) trên 6 tầng kiến trúc:
+
+1. **Tầng Thực Thi Thuật Toán Ghép Cặp & Chấm Điểm (`Numba` & `NumPy`):**
+   - Trong `src/core/scoring.py`: Bổ sung các hàm tính toán ma trận điểm tổng hợp biên dịch mã máy song song `@numba.njit(parallel=True, fastmath=True)` (`compute_composite_score_matrices_numba`, `compute_cosine_similarity_matrix_numba`) và hàm tính Cosine Similarity `@numba.njit(fastmath=True)` trên mảng `numpy.ndarray`.
+   - Trong `src/core/matching_engine.py` và `app/matching.py`: Biểu diễn bảng xếp hạng ưu tiên (preference lists), bảng tra cứu thứ hạng nghịch đảo $O(1)$ và trạng thái ghép cặp dưới dạng mảng số nguyên 2 chiều `int32[:, :]`, biên dịch vòng lặp `while` của thuật toán Gale-Shapley Deferred Acceptance (cả 2 chế độ `candidate` và `employer`) bằng `@numba.njit`.
+
+2. **Tầng Sinh Vector Nhúng (`ONNX Runtime` / `FastEmbed` & SHA-256 Caching):**
+   - Trong `app/embeddings.py`: Loại bỏ phụ thuộc PyTorch/CUDA nặng nề, chuyển sang suy luận qua `onnxruntime.InferenceSession` (hỗ trợ Quantization INT8/FP16) và `FastEmbed`.
+   - Tích hợp xử lý theo lô động (`get_embeddings_batch` - Dynamic Batching) kết hợp bộ nhớ đệm LRU đánh chỉ mục bằng hàm băm `SHA-256` (`SHA256EmbeddingCache`) trên văn bản đã chuẩn hóa từ `src/core/preprocessor.py`.
+
+3. **Tầng Cơ Sở Dữ Liệu & Truy Xuất Bất Đồng Bộ (`AsyncQdrantClient` gRPC & `asyncpg`):**
+   - Trong `app/database.py` và `app/models.py`: Nâng cấp kết nối cơ sở dữ liệu quan hệ sang **SQLAlchemy 2.0 Async** (`create_async_engine`, `async_sessionmaker`, `AsyncSession`) với driver `postgresql+asyncpg://`.
+   - Tích hợp `AsyncQdrantClient(prefer_grpc=True)` qua cổng gRPC `6334` kèm **Filterable HNSW Payload Indexing** (`HARD_CONSTRAINT_PAYLOAD_FIELDS`: `location`, `salary_min`, `salary_max`, `experience_years`, `career_domain`, `nhom_khuyet_tat`, `work_mode`) để thực hiện Pre-filtering ngay tại tầng lưu trữ.
+   - Trong `scripts/ingest_candidates.py` và `scripts/ingest_job_descriptions.py`: Hỗ trợ nạp điểm bất đồng bộ theo lô song song `upload_points(..., parallel=4)`.
+
+4. **Tầng Xác Thực Dữ Liệu & API (`Pydantic V2`, `orjson`, `slots=True`):**
+   - Trong `app/main.py`: Thiết lập `default_response_class=ORJSONResponse` để tuần tự hóa JSON tốc độ cao trực tiếp từ đối tượng Pydantic và mảng `numpy.ndarray`.
+   - Trong `app/schemas.py`, `app/config.py`, `src/core/profile_models.py`, `src/core/preprocessor.py`, `src/core/postprocessor.py`, `src/core/scoring.py` và `src/core/matching_engine.py`: Chuẩn hóa `ConfigDict`, `TypeAdapter` của Pydantic V2 và gắn `@dataclass(slots=True)` cho toàn bộ các lớp dữ liệu nội bộ để giảm chi phí cấp phát bộ nhớ.
+
+5. **Tầng Tiền Xử Lý & Nạp Dữ Liệu ETL (`Polars` & `fastexcel` / `calamine`):**
+   - Trong `scripts/convert_xlsx_to_csv.py`: Đọc file Excel bằng `polars.read_excel(..., engine="calamine")` (thông qua `fastexcel`) và xuất CSV bằng `write_csv()`.
+   - Trong `scripts/ingest_candidates.py`, `scripts/ingest_job_descriptions.py` và `src/core/preprocessor.py`: Sử dụng `pl.scan_csv()` dựa trên chuẩn bộ nhớ cột Apache Arrow và biểu thức chuỗi vector hóa của Polars (`preprocess_dataframe_polars`).
+
+6. **Tầng Đóng Gói, Quản Lý Gói & Bảng Điều Khiển (`Astral uv`, Docker Multi-stage & Streamlit Caching):**
+   - Trong `Dockerfile`: Áp dụng **Docker Multi-stage Build** (`builder` và `runtime`), tích hợp `COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/` và cài đặt gói bằng `uv pip install --system --no-cache -r requirements.txt`.
+   - Trong `dashboard.py`: Bổ sung `@st.cache_resource` và `@st.cache_data` cho tác vụ khởi tạo tài nguyên, nạp thị trường và tính toán ma trận/benchmark.

@@ -32,6 +32,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import streamlit as st
@@ -59,6 +60,11 @@ try:  # pragma: no cover - phụ thuộc môi trường chạy
         generate_top_k,
         load_market_from_csv,
     )
+    from src.evaluation.benchmark import (
+        BenchmarkResult,
+        generate_synthetic_market,
+        run_benchmark,
+    )
     from src.evaluation.metrics import EvaluationReport, evaluate
 except ImportError as exc:  # pragma: no cover
     st.error(
@@ -73,6 +79,59 @@ CELL_PATTERN = re.compile(r"[,;\t]")
 QUOTA_PATTERN = re.compile(r"[,;:=\t]")
 CSV_CANDIDATES = ROOT / "scripts" / "data" / "candidates.csv"
 CSV_JOBS = ROOT / "scripts" / "data" / "job_descriptions.csv"
+
+
+@st.cache_resource(show_spinner=False)
+def get_cached_preprocessor_resource(
+    max_candidate_preferences: int = 40,
+    max_employer_preferences: int | None = None,
+    min_e_score: float = 0.0,
+    min_c_score: float = 0.0,
+    require_positive_scores: bool = True,
+    tie_break_seed: int = 20_240_517,
+    use_skill_tie_break: bool = True,
+) -> Preprocessor:
+    """Khởi tạo và lưu trữ đệm tài nguyên Preprocessor bằng @st.cache_resource."""
+    return Preprocessor(
+        PreprocessConfig(
+            max_candidate_preferences=max_candidate_preferences,
+            max_employer_preferences=max_employer_preferences,
+            min_e_score=min_e_score,
+            min_c_score=min_c_score,
+            require_positive_scores=require_positive_scores,
+            tie_break_seed=tie_break_seed,
+            use_skill_tie_break=use_skill_tie_break,
+        )
+    )
+
+
+@st.cache_resource(show_spinner=False)
+def get_cached_embedding_model_resource() -> Any:
+    """Nạp và lưu đệm mô hình embedding ONNX Runtime / FastEmbed bằng @st.cache_resource."""
+    from app.embeddings import get_embedding_model
+
+    return get_embedding_model()
+
+
+@st.cache_data(show_spinner=False)
+def run_cached_benchmark(
+    n_candidates: int = 2_000,
+    n_jobs: int = 400,
+    avg_quota: int = 5,
+    density: float = 0.4,
+    max_preferences: int = 40,
+    seed: int = 42,
+) -> list[dict[str, Any]]:
+    """Tính toán và lưu đệm kết quả benchmark từ `src/evaluation/benchmark.py` bằng @st.cache_data."""
+    results: list[BenchmarkResult] = run_benchmark(
+        n_candidates=n_candidates,
+        n_jobs=n_jobs,
+        avg_quota=avg_quota,
+        density=density,
+        max_preferences=max_preferences,
+        seed=seed,
+    )
+    return [r.as_dict() for r in results]
 
 
 @dataclass
@@ -127,6 +186,7 @@ class MarketInput:
 # ---------------------------------------------------------------------------
 
 
+@st.cache_data(show_spinner=False)
 def build_synthetic_market(
     n_candidates: int,
     n_jobs: int,
@@ -134,7 +194,7 @@ def build_synthetic_market(
     density: float,
     seed: int,
 ) -> MarketInput:
-    """Sinh thị trường mô phỏng tất định để thử thuật toán.
+    """Sinh thị trường mô phỏng tất định để thử thuật toán (có lưu đệm @st.cache_data).
 
     Điểm ``E`` và ``C`` được sinh từ cùng một "độ hợp" ẩn cộng nhiễu riêng, nên
     hai phía vừa có tương quan vừa có xung đột - đủ để kết quả matching có ý
@@ -302,6 +362,7 @@ def parse_quotas(text: str, job_ids: tuple[str, ...], default: int) -> dict[str,
     return {job: parsed.get(job, default) for job in job_ids}
 
 
+@st.cache_data(show_spinner=False)
 def load_repo_csv_market(
     *,
     default_quota: int,
@@ -309,7 +370,7 @@ def load_repo_csv_market(
     candidate_limit: int | None,
     job_limit: int | None,
 ) -> MarketInput:
-    """Nạp thị trường từ ``scripts/data/*.csv`` sẵn có của repo.
+    """Nạp thị trường từ ``scripts/data/*.csv`` sẵn có của repo (có lưu đệm @st.cache_data).
 
     Dùng đúng adapter :func:`src.core.load_market_from_csv`: Hard Constraint bắt
     buộc là **trùng nhóm khuyết tật**, điểm ``E``/``C`` sinh mô phỏng tất định.
@@ -398,7 +459,12 @@ def build_grid_market(
         )
 
     quotas = parse_quotas(quota_text, e_jobs, default_quota)
-    filled = sum(1 for candidate in e_candidates for job in e_scores[candidate] if job in c_scores.get(candidate, {}))
+    filled = sum(
+        1
+        for candidate in e_candidates
+        for job in e_scores[candidate]
+        if job in c_scores.get(candidate, {})
+    )
 
     return MarketInput(
         name=name,
@@ -468,7 +534,16 @@ def run_matching(
 
     started = time.perf_counter()
 
-    profile = Preprocessor(config).build_profile(
+    preprocessor = get_cached_preprocessor_resource(
+        max_candidate_preferences=config.max_candidate_preferences,
+        max_employer_preferences=config.max_employer_preferences,
+        min_e_score=config.min_e_score,
+        min_c_score=config.min_c_score,
+        require_positive_scores=config.require_positive_scores,
+        tie_break_seed=config.tie_break_seed,
+        use_skill_tie_break=config.use_skill_tie_break,
+    )
+    profile = preprocessor.build_profile(
         market.e_scores,
         market.c_scores,
         market.quotas,
@@ -591,6 +666,7 @@ def recommendation_dataframe(output: RunOutput) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=columns)
 
 
+@st.cache_data(show_spinner=False)
 def matrix_dataframe(
     scores: ScoreMatrix,
     candidate_ids: tuple[str, ...],
@@ -599,7 +675,7 @@ def matrix_dataframe(
     row_limit: int,
     col_limit: int,
 ) -> pd.DataFrame:
-    """Chuyển ma trận thưa thành DataFrame để xem trước (ô trống = không khả thi)."""
+    """Chuyển ma trận thưa thành DataFrame để xem trước (lưu đệm bằng @st.cache_data)."""
 
     rows = list(candidate_ids)[:row_limit]
     columns = list(job_ids)[:col_limit]
@@ -775,16 +851,7 @@ def _render_algorithm_settings(
     source: str,
     market: MarketInput,
 ) -> DashboardSettings:
-    """Vẽ nhóm widget tiền xử lý + thuật toán và gói thành ``DashboardSettings``.
-
-    Args:
-        sidebar: Đối tượng sidebar của Streamlit.
-        source: Nhãn nguồn dữ liệu đã chọn.
-        market: Thị trường vừa dựng.
-
-    Returns:
-        ``DashboardSettings`` hoàn chỉnh.
-    """
+    """Vẽ nhóm widget tiền xử lý + thuật toán và gói thành ``DashboardSettings``."""
 
     sidebar.subheader("🧹 Tiền xử lý")
     max_candidate_preferences = int(
@@ -1150,14 +1217,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
-
-
-
-

@@ -25,6 +25,9 @@ import time
 from collections import deque
 from typing import Any
 
+import numba
+import numpy as np
+
 from app.schemas import (
     CandidateProfileInput,
     CandidateRecommendationResponse,
@@ -360,6 +363,184 @@ def build_rank_lookup_table(preferences: dict[str, list[str]]) -> dict[str, dict
 # GIAI ĐOẠN 3: LÕI THUẬT TOÁN GALE-SHAPLEY DEFERRED ACCEPTANCE (MANY-TO-ONE)
 # ===========================================================================
 
+
+@numba.njit(cache=True)
+def _app_gs_candidate_proposing_numba(
+    cand_prefs_arr: np.ndarray,
+    cand_pref_lens: np.ndarray,
+    job_rank_arr: np.ndarray,
+    quotas_arr: np.ndarray,
+) -> tuple[np.ndarray, int]:
+    """Vòng lặp while Gale-Shapley Candidate-Proposing biên dịch mã máy Numba trên mảng 2 chiều int32[:, :]."""
+    n_cands = cand_prefs_arr.shape[0]
+    n_jobs = job_rank_arr.shape[0]
+
+    max_quota = 1
+    for j in range(n_jobs):
+        if quotas_arr[j] > max_quota:
+            max_quota = quotas_arr[j]
+
+    held_cands = np.full((n_jobs, max_quota), -1, dtype=np.int32)
+    held_ranks = np.full((n_jobs, max_quota), -1, dtype=np.int32)
+    held_counts = np.zeros(n_jobs, dtype=np.int32)
+
+    matches_arr = np.full(n_cands, -1, dtype=np.int32)
+    next_proposal = np.zeros(n_cands, dtype=np.int32)
+
+    max_q = max(16, n_cands * (cand_prefs_arr.shape[1] + 2) + 16)
+    queue = np.empty(max_q, dtype=np.int32)
+    head = 0
+    tail = 0
+
+    for c in range(n_cands):
+        if cand_pref_lens[c] > 0:
+            queue[tail] = c
+            tail += 1
+
+    total_proposals = 0
+
+    while head < tail:
+        c = queue[head]
+        head += 1
+
+        p_index = next_proposal[c]
+        if p_index >= cand_pref_lens[c]:
+            continue
+
+        j = cand_prefs_arr[c, p_index]
+        next_proposal[c] = p_index + 1
+        total_proposals += 1
+
+        if j < 0:
+            queue[tail] = c
+            tail += 1
+            continue
+
+        quota = quotas_arr[j]
+        if quota <= 0:
+            queue[tail] = c
+            tail += 1
+            continue
+
+        c_rank_in_j = job_rank_arr[j, c]
+        if c_rank_in_j < 0:
+            queue[tail] = c
+            tail += 1
+            continue
+
+        cnt = held_counts[j]
+        if cnt < quota:
+            held_cands[j, cnt] = c
+            held_ranks[j, cnt] = c_rank_in_j
+            held_counts[j] = cnt + 1
+            matches_arr[c] = j
+            continue
+
+        worst_slot = 0
+        worst_rank = held_ranks[j, 0]
+        for s in range(1, cnt):
+            r = held_ranks[j, s]
+            if r > worst_rank:
+                worst_rank = r
+                worst_slot = s
+
+        if c_rank_in_j < worst_rank:
+            worst_cand = held_cands[j, worst_slot]
+            held_cands[j, worst_slot] = c
+            held_ranks[j, worst_slot] = c_rank_in_j
+            matches_arr[worst_cand] = -1
+            matches_arr[c] = j
+            queue[tail] = worst_cand
+            tail += 1
+        else:
+            queue[tail] = c
+            tail += 1
+
+    return matches_arr, total_proposals
+
+
+@numba.njit(cache=True)
+def _app_gs_employer_proposing_numba(
+    job_prefs_arr: np.ndarray,
+    job_pref_lens: np.ndarray,
+    cand_rank_arr: np.ndarray,
+    quotas_arr: np.ndarray,
+    initial_free_jobs: np.ndarray,
+) -> tuple[np.ndarray, int]:
+    """Vòng lặp while Gale-Shapley Employer-Proposing biên dịch mã máy Numba trên mảng 2 chiều int32[:, :]."""
+    n_cands = cand_rank_arr.shape[0]
+    n_jobs = job_prefs_arr.shape[0]
+
+    assigned_matrix = np.zeros((n_jobs, max(1, n_cands)), dtype=np.int32)
+    assigned_counts = np.zeros(n_jobs, dtype=np.int32)
+    held_by_candidate = np.full(n_cands, -1, dtype=np.int32)
+    next_proposal_idx = np.zeros(n_jobs, dtype=np.int32)
+
+    max_q = max(32, n_jobs * (job_prefs_arr.shape[1] * 2 + 4) + 32)
+    queue = np.empty(max_q, dtype=np.int32)
+    head = 0
+    tail = 0
+
+    for idx_j in range(initial_free_jobs.shape[0]):
+        queue[tail] = initial_free_jobs[idx_j]
+        tail += 1
+
+    total_proposals = 0
+
+    while head < tail:
+        j = queue[head]
+        head += 1
+
+        quota = quotas_arr[j]
+        if assigned_counts[j] >= quota or quota <= 0:
+            continue
+
+        p_idx = next_proposal_idx[j]
+        if p_idx >= job_pref_lens[j]:
+            continue
+
+        candidate = job_prefs_arr[j, p_idx]
+        next_proposal_idx[j] = p_idx + 1
+        total_proposals += 1
+
+        if candidate < 0:
+            if assigned_counts[j] < quota and next_proposal_idx[j] < job_pref_lens[j]:
+                queue[tail] = j
+                tail += 1
+            continue
+
+        rank_new = cand_rank_arr[candidate, j]
+        if rank_new < 0:
+            if assigned_counts[j] < quota and next_proposal_idx[j] < job_pref_lens[j]:
+                queue[tail] = j
+                tail += 1
+            continue
+
+        current_job = held_by_candidate[candidate]
+        if current_job < 0:
+            assigned_matrix[j, candidate] = 1
+            assigned_counts[j] += 1
+            held_by_candidate[candidate] = j
+        else:
+            rank_curr = cand_rank_arr[candidate, current_job]
+            if rank_curr < 0 or rank_new < rank_curr:
+                if assigned_matrix[current_job, candidate] == 1:
+                    assigned_matrix[current_job, candidate] = 0
+                    assigned_counts[current_job] -= 1
+                queue[tail] = current_job
+                tail += 1
+
+                assigned_matrix[j, candidate] = 1
+                assigned_counts[j] += 1
+                held_by_candidate[candidate] = j
+
+        if assigned_counts[j] < quota and next_proposal_idx[j] < job_pref_lens[j]:
+            queue[tail] = j
+            tail += 1
+
+    return held_by_candidate, total_proposals
+
+
 def candidate_proposing_deferred_acceptance(
     candidates_pref: dict[str, list[str]],
     jobs_pref: dict[str, list[str]],
@@ -372,116 +553,69 @@ def candidate_proposing_deferred_acceptance(
         Giải bài toán phân bổ ổn định trên thị trường hai phía với phía Ứng viên là người chủ động gửi đề nghị.
         Đảm bảo 100% tính ổn định (không có blocking pair), đạt tính tối ưu cao nhất cho Ứng viên (C-optimal),
         và có tính chất chống khai gian (Strategy-Proof) đối với Ứng viên.
-
-    Tham số đầu vào:
-        candidates_pref (dict[str, list[str]]):
-            Danh sách ưu tiên của từng ứng viên: {candidate_id: [job_id_1, job_id_2, ...]}.
-        jobs_pref (dict[str, list[str]]):
-            Danh sách ưu tiên của từng công việc: {job_id: [candidate_id_1, candidate_id_2, ...]}.
-        job_quotas (dict[str, int]):
-            Hạn mức tuyển dụng cho từng công việc: {job_id: quota_int}.
-
-    Kết quả trả về:
-        tuple[dict[str, str], dict[str, list[str]], int]:
-            - matches: Ánh xạ gán cặp {candidate_id: job_id} cho các ứng viên trúng tuyển.
-            - job_assignments: Danh sách ứng viên trúng tuyển của từng công việc {job_id: [candidate_id, ...]}.
-            - proposals_count: Tổng số lượt đề xuất đã diễn ra trong toàn bộ thuật toán.
+        Vòng lặp while được biên dịch sang mã máy bằng @numba.njit trên mảng 2 chiều int32[:, :].
     """
-    # Dựng bảng tra cứu thứ hạng nghịch đảo cho phía Job để so sánh O(1)
     job_rank_table = build_rank_lookup_table(jobs_pref)
 
-    # Khởi tạo hàng đợi ứng viên chưa được gán cặp (unmatched)
-    unmatched_candidates: deque[str] = deque(
-        c for c in sorted(candidates_pref.keys()) if candidates_pref.get(c)
+    all_cands = sorted(
+        set(candidates_pref.keys())
+        | {c for j_list in jobs_pref.values() for c in j_list}
+    )
+    all_jobs = sorted(
+        set(jobs_pref.keys())
+        | set(job_quotas.keys())
+        | {j for c_list in candidates_pref.values() for j in c_list}
     )
 
-    # Đếm số lời đề nghị mà mỗi ứng viên đã gửi đi
-    proposals_count_by_cand: dict[str, int] = {c: 0 for c in candidates_pref}
+    if not all_cands or not all_jobs:
+        return {}, {j: [] for j in jobs_pref}, 0
 
-    # Quản lý danh sách ứng viên đang được giữ tạm thời (held applicants) của mỗi công việc
-    # Sử dụng Min-Heap trên giá trị (-rank): đỉnh heap là ứng viên có rank lớn nhất (kém ưu tiên nhất)
-    held_heap: dict[str, list[tuple[int, int, str]]] = {j: [] for j in jobs_pref}
-    held_candidates_set: dict[str, set[str]] = {j: set() for j in jobs_pref}
+    cand_to_idx = {c: i for i, c in enumerate(all_cands)}
+    job_to_idx = {j: i for i, j in enumerate(all_jobs)}
+    n_cands = len(all_cands)
+    n_jobs = len(all_jobs)
 
-    # Bộ đếm phân giải hòa cho heap
-    tie_counter = itertools.count()
+    max_c_len = max((len(candidates_pref.get(c, [])) for c in all_cands), default=0)
+    cand_prefs_arr = np.full((n_cands, max(1, max_c_len)), -1, dtype=np.int32)
+    cand_pref_lens = np.zeros(n_cands, dtype=np.int32)
+    job_rank_arr = np.full((n_jobs, n_cands), -1, dtype=np.int32)
+    quotas_arr = np.zeros(n_jobs, dtype=np.int32)
 
-    # Lưu kết quả ánh xạ {candidate_id: job_id}
+    for c_idx, c_id in enumerate(all_cands):
+        c_list = candidates_pref.get(c_id, [])
+        if c_list:
+            cand_prefs_arr[c_idx, : len(c_list)] = [job_to_idx[j] for j in c_list]
+            cand_pref_lens[c_idx] = len(c_list)
+
+    for j_idx, j_id in enumerate(all_jobs):
+        quotas_arr[j_idx] = max(0, int(job_quotas.get(j_id, 0)))
+        for rank_pos, c_id in enumerate(jobs_pref.get(j_id, [])):
+            c_idx = cand_to_idx.get(c_id)
+            if c_idx is not None:
+                job_rank_arr[j_idx, c_idx] = rank_pos
+
+    matches_arr, total_proposals = _app_gs_candidate_proposing_numba(
+        cand_prefs_arr,
+        cand_pref_lens,
+        job_rank_arr,
+        quotas_arr,
+    )
+
     matches: dict[str, str] = {}
-    total_proposals = 0
+    for c_idx, j_idx in enumerate(matches_arr):
+        if j_idx >= 0:
+            matches[all_cands[c_idx]] = all_jobs[int(j_idx)]
 
-    # Vòng lặp Deferred Acceptance: lặp khi còn ứng viên tự do và chưa cạn danh sách nguyện vọng
-    while unmatched_candidates:
-        c = unmatched_candidates.popleft()
-        c_prefs = candidates_pref.get(c, [])
-        p_index = proposals_count_by_cand.get(c, 0)
-
-        # Nếu ứng viên đã gửi đề nghị tới tất cả các công việc trong danh sách ưu tiên của mình
-        if p_index >= len(c_prefs):
-            continue
-
-        # Chọn công việc tiếp theo có thứ tự ưu tiên cao nhất chưa từng đề nghị
-        j = c_prefs[p_index]
-        proposals_count_by_cand[c] = p_index + 1
-        total_proposals += 1
-
-        # Lấy hạn mức tuyển dụng quota của công việc j
-        quota = max(0, job_quotas.get(j, 0))
-        if quota <= 0:
-            # Công việc không có chỉ tiêu tuyển dụng, ứng viên tiếp tục xét nguyện vọng kế
-            unmatched_candidates.append(c)
-            continue
-
-        # Kiểm tra xem ứng viên c có được chấp nhận bởi công việc j không
-        j_rank_dict = job_rank_table.get(j, {})
-        if c not in j_rank_dict:
-            # Công việc j không chấp nhận ứng viên c (không nằm trong acceptable list)
-            unmatched_candidates.append(c)
-            continue
-
-        c_rank_in_j = j_rank_dict[c]
-
-        # Trường hợp 1: Công việc j vẫn còn slot trống (chưa đầy quota)
-        if len(held_candidates_set[j]) < quota:
-            # Công việc j chấp nhận tạm thời ứng viên c
-            heapq.heappush(held_heap[j], (-c_rank_in_j, next(tie_counter), c))
-            held_candidates_set[j].add(c)
-            matches[c] = j
-            continue
-
-        # Trường hợp 2: Công việc j đã đầy chỉ tiêu tuyển dụng (len == quota)
-        # So sánh ứng viên mới c với ứng viên kém nhất đang được giữ (đỉnh min-heap với -rank)
-        worst_neg_rank, _, worst_cand = held_heap[j][0]
-        worst_rank = -worst_neg_rank
-
-        if c_rank_in_j < worst_rank:
-            # Ứng viên mới c tốt hơn ứng viên kém nhất hiện tại -> Thay thế!
-            heapq.heapreplace(held_heap[j], (-c_rank_in_j, next(tie_counter), c))
-            held_candidates_set[j].discard(worst_cand)
-            held_candidates_set[j].add(c)
-
-            # Cập nhật trạng thái ghép cặp
-            matches.pop(worst_cand, None)
-            matches[c] = j
-
-            # Ứng viên bị đào thải quay trở lại hàng đợi tự do để tìm cơ hội ở công việc tiếp theo
-            unmatched_candidates.append(worst_cand)
-        else:
-            # Ứng viên mới c kém hơn tất cả những người đang được giữ -> c bị từ chối
-            unmatched_candidates.append(c)
-
-    # Đóng gói danh sách trúng tuyển cuối cùng theo từng vị trí tuyển dụng
     job_assignments: dict[str, list[str]] = {j: [] for j in jobs_pref}
     for c_id, j_id in matches.items():
         if j_id in job_assignments:
             job_assignments[j_id].append(c_id)
 
-    # Sắp xếp các ứng viên trong mỗi công việc theo đúng thứ tự ưu tiên của nhà tuyển dụng
     for j_id, c_list in job_assignments.items():
         rank_dict = job_rank_table.get(j_id, {})
         c_list.sort(key=lambda cand: rank_dict.get(cand, 999999))
 
-    return matches, job_assignments, total_proposals
+    return matches, job_assignments, int(total_proposals)
 
 
 def employer_proposing_deferred_acceptance(
@@ -495,90 +629,75 @@ def employer_proposing_deferred_acceptance(
     Mục đích:
         Thực hiện ghép cặp ổn định với phía Nhà tuyển dụng/Công việc chủ động gửi đề nghị tới ứng viên.
         Kết quả đạt tối ưu cho phía nhà tuyển dụng (J-optimal / E-optimal), phù hợp mô hình B2B.
-
-    Tham số đầu vào:
-        candidates_pref (dict[str, list[str]]): Danh sách ưu tiên của ứng viên.
-        jobs_pref (dict[str, list[str]]): Danh sách ưu tiên của công việc.
-        job_quotas (dict[str, int]): Hạn mức tuyển dụng của từng công việc.
-
-    Kết quả trả về:
-        tuple[dict[str, str], dict[str, list[str]], int]:
-            - matches: {candidate_id: job_id}
-            - job_assignments: {job_id: [candidate_id, ...]}
-            - proposals_count: Tổng số lượt đề xuất
+        Vòng lặp while được biên dịch sang mã máy bằng @numba.njit trên mảng 2 chiều int32[:, :].
     """
-    # Dựng bảng tra cứu thứ hạng của công việc trong mắt ứng viên
-    cand_rank_table = build_rank_lookup_table(candidates_pref)
-
-    # Khởi tạo danh sách công việc còn thiếu chỉ tiêu
-    free_jobs: deque[str] = deque(
-        j for j in sorted(jobs_pref.keys()) if jobs_pref.get(j) and job_quotas.get(j, 0) > 0
+    all_cands = sorted(
+        set(candidates_pref.keys())
+        | {c for j_list in jobs_pref.values() for c in j_list}
     )
-    next_proposal_idx: dict[str, int] = {j: 0 for j in jobs_pref}
+    all_jobs = sorted(
+        set(jobs_pref.keys())
+        | set(job_quotas.keys())
+        | {j for c_list in candidates_pref.values() for j in c_list}
+    )
 
-    # Quản lý danh sách ứng viên mà mỗi công việc đang giữ
-    assigned_by_job: dict[str, set[str]] = {j: set() for j in jobs_pref}
-    # Ứng viên giữ lời đề nghị tốt nhất của công việc nào
-    held_by_candidate: dict[str, str] = {}
+    if not all_cands or not all_jobs:
+        return {}, {j: [] for j in jobs_pref}, 0
 
-    total_proposals = 0
+    cand_to_idx = {c: i for i, c in enumerate(all_cands)}
+    job_to_idx = {j: i for i, j in enumerate(all_jobs)}
+    n_cands = len(all_cands)
+    n_jobs = len(all_jobs)
 
-    while free_jobs:
-        j = free_jobs.popleft()
-        quota = job_quotas.get(j, 0)
+    max_j_len = max((len(jobs_pref.get(j, [])) for j in all_jobs), default=0)
+    job_prefs_arr = np.full((n_jobs, max(1, max_j_len)), -1, dtype=np.int32)
+    job_pref_lens = np.zeros(n_jobs, dtype=np.int32)
+    cand_rank_arr = np.full((n_cands, n_jobs), -1, dtype=np.int32)
+    quotas_arr = np.zeros(n_jobs, dtype=np.int32)
 
-        # Nếu công việc đã đủ người hoặc hết quota
-        if len(assigned_by_job[j]) >= quota or quota <= 0:
-            continue
+    for c_idx, c_id in enumerate(all_cands):
+        for rank_pos, j_id in enumerate(candidates_pref.get(c_id, [])):
+            j_idx = job_to_idx.get(j_id)
+            if j_idx is not None:
+                cand_rank_arr[c_idx, j_idx] = rank_pos
 
-        j_prefs = jobs_pref.get(j, [])
-        p_idx = next_proposal_idx.get(j, 0)
+    for j_idx, j_id in enumerate(all_jobs):
+        quotas_arr[j_idx] = int(job_quotas.get(j_id, 0))
+        j_list = jobs_pref.get(j_id, [])
+        if j_list:
+            job_prefs_arr[j_idx, : len(j_list)] = [cand_to_idx[c] for c in j_list]
+            job_pref_lens[j_idx] = len(j_list)
 
-        if p_idx >= len(j_prefs):
-            continue
+    initial_free_jobs = np.array(
+        [
+            job_to_idx[j]
+            for j in sorted(jobs_pref.keys())
+            if jobs_pref.get(j) and job_quotas.get(j, 0) > 0
+        ],
+        dtype=np.int32,
+    )
 
-        # Chọn ứng viên tiếp theo trong danh sách ưu tiên của công việc
-        candidate = j_prefs[p_idx]
-        next_proposal_idx[j] = p_idx + 1
-        total_proposals += 1
+    held_by_cand_arr, total_proposals = _app_gs_employer_proposing_numba(
+        job_prefs_arr,
+        job_pref_lens,
+        cand_rank_arr,
+        quotas_arr,
+        initial_free_jobs,
+    )
 
-        # Kiểm tra xem ứng viên có chấp nhận công việc này không
-        c_rank_dict = cand_rank_table.get(candidate, {})
-        if j not in c_rank_dict:
-            # Ứng viên không chấp nhận công việc j
-            if len(assigned_by_job[j]) < quota and next_proposal_idx[j] < len(j_prefs):
-                free_jobs.append(j)
-            continue
+    matches: dict[str, str] = {}
+    assigned_by_job: dict[str, list[str]] = {j: [] for j in jobs_pref}
+    for c_idx, j_idx in enumerate(held_by_cand_arr):
+        if j_idx >= 0:
+            c_id = all_cands[c_idx]
+            j_id = all_jobs[int(j_idx)]
+            matches[c_id] = j_id
+            if j_id in assigned_by_job:
+                assigned_by_job[j_id].append(c_id)
 
-        current_job = held_by_candidate.get(candidate)
-        if current_job is None:
-            # Ứng viên đang tự do, tạm chấp nhận công việc j
-            assigned_by_job[j].add(candidate)
-            held_by_candidate[candidate] = j
-        else:
-            # Ứng viên đã có một lời mời, so sánh thứ hạng của j và current_job
-            rank_new = c_rank_dict[j]
-            rank_curr = c_rank_dict.get(current_job, 999999)
+    job_assignments = {j: sorted(cands) for j, cands in assigned_by_job.items()}
 
-            if rank_new < rank_curr:
-                # Ứng viên thích công việc mới j hơn công việc hiện tại -> Đổi sang j!
-                assigned_by_job[current_job].discard(candidate)
-                free_jobs.append(current_job)  # Công việc cũ bị mất người, quay lại tìm ứng viên khác
-
-                assigned_by_job[j].add(candidate)
-                held_by_candidate[candidate] = j
-            else:
-                # Ứng viên từ chối công việc mới j
-                pass
-
-        # Nếu công việc j vẫn chưa đủ chỉ tiêu và còn ứng viên trong danh sách ưu tiên
-        if len(assigned_by_job[j]) < quota and next_proposal_idx[j] < len(j_prefs):
-            free_jobs.append(j)
-
-    matches = {c: j for c, j in held_by_candidate.items()}
-    job_assignments = {j: sorted(list(cands)) for j, cands in assigned_by_job.items()}
-
-    return matches, job_assignments, total_proposals
+    return matches, job_assignments, int(total_proposals)
 
 
 # ===========================================================================

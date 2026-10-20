@@ -14,8 +14,10 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from pydantic import ConfigDict, TypeAdapter
 
-@dataclass
+
+@dataclass(slots=True)
 class CandidateProfile:
     """Hồ sơ ứng viên chuẩn hóa theo Mục 6.1.
 
@@ -91,7 +93,7 @@ class CandidateProfile:
         }
 
 
-@dataclass
+@dataclass(slots=True)
 class JobProfile:
     """Hồ sơ vị trí tuyển dụng chuẩn hóa theo Mục 6.1.
 
@@ -154,7 +156,7 @@ class JobProfile:
         return s_min, s_max
 
 
-@dataclass
+@dataclass(slots=True)
 class ExecutionAudit:
     """Bản ghi kiểm toán và tái lập kết quả theo Mục 6.4.
 
@@ -178,3 +180,9 @@ class ExecutionAudit:
         """Chuyển bản ghi kiểm toán thành dict."""
         return asdict(self)
 
+
+# Pydantic V2 ConfigDict & TypeAdapters cho xác thực/tuần tự hóa tốc độ cao
+PROFILE_MODEL_CONFIG = ConfigDict(arbitrary_types_allowed=True, extra="ignore")
+CandidateProfileAdapter: TypeAdapter[CandidateProfile] = TypeAdapter(CandidateProfile)
+JobProfileAdapter: TypeAdapter[JobProfile] = TypeAdapter(JobProfile)
+ExecutionAuditAdapter: TypeAdapter[ExecutionAudit] = TypeAdapter(ExecutionAudit)

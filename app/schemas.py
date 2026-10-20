@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from typing import Any
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
 
 
 # Tập hợp các nhóm khuyết tật hợp lệ trong hệ thống AVORA
@@ -77,6 +77,8 @@ def validate_disability_group(value: str) -> str:
 class JobDescriptionCreate(BaseModel):
     """Payload cho POST /job-descriptions."""
 
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
     nhom_khuyet_tat: str = Field(min_length=1)
     mo_ta_cong_viec: str = Field(min_length=50)
 
@@ -122,11 +124,13 @@ class JobDescriptionResponse(BaseModel):
     nhom_khuyet_tat: str
     mo_ta_cong_viec: str
 
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 
 
 class CandidateCreate(BaseModel):
     """Payload cho POST /candidates."""
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
     ho_ten: str = Field(min_length=1)
     nhom_khuyet_tat: str = Field(min_length=1)
@@ -169,11 +173,13 @@ class CandidateResponse(BaseModel):
     ho_ten: str
     nhom_khuyet_tat: str
 
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 
 
 class MatchQuery(BaseModel):
     """Payload cho POST /match."""
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
     query: str = Field(min_length=1)
     top_k_descriptions: int = Field(default=20, ge=1, le=200)
@@ -198,12 +204,16 @@ class MatchQuery(BaseModel):
 class MatchedGroup(BaseModel):
     """Điểm tổng hợp của một nhóm khuyết tật."""
 
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
+
     nhom_khuyet_tat: str
     score: float = Field(ge=-1.0, le=1.0)
 
 
 class MatchedDescription(BaseModel):
     """Mô tả gần query, dùng để kiểm tra kết quả matching."""
+
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 
     id: int
     nhom_khuyet_tat: str
@@ -213,6 +223,8 @@ class MatchedDescription(BaseModel):
 
 class MatchResponse(BaseModel):
     """Response đầy đủ của POST /match."""
+
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 
     matched_groups: list[MatchedGroup]
     matched_descriptions: list[MatchedDescription] = Field(default_factory=list)
@@ -231,6 +243,8 @@ class Vector3D(BaseModel):
         Dùng để mô hình hóa vector năng lực ứng viên u = (x1, y1, z1)
         và vector yêu cầu tuyển dụng v = (x2, y2, z2) trong không gian Oxyz.
     """
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
     x: float = Field(description="Tọa độ x (ví dụ: Chuyên môn / Kỹ năng cứng)")
     y: float = Field(description="Tọa độ y (ví dụ: Kỹ năng mềm / Thích ứng)")
@@ -320,6 +334,8 @@ class HardConstraints(BaseModel):
         sẽ có điểm ưu tiên bị triệt tiêu bằng 0 thông qua hàm chỉ báo (Indicator Function).
     """
 
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
     min_salary: float | None = Field(default=None, description="Mức lương tối thiểu mong muốn")
     max_salary: float | None = Field(default=None, description="Mức lương tối đa nhà tuyển dụng chi trả")
     max_distance_km: float | None = Field(default=None, description="Khoảng cách địa lý tối đa cho phép (km)")
@@ -333,6 +349,8 @@ class CandidateProfileInput(BaseModel):
     Mục đích:
         Chứa thông tin định danh, sở thích, điểm ưu tiên và vector năng lực Oxyz của ứng viên.
     """
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
     id: str = Field(default="", description="Định danh duy nhất của ứng viên (ví dụ: 'C1', 'cand_01')")
     candidate_id: str | None = Field(default=None, description="Định danh ứng viên (alias cho id)")
@@ -391,6 +409,8 @@ class JobProfileInput(BaseModel):
         Chứa thông tin vị trí, hạn mức tuyển dụng (Quota), danh sách ưu tiên, và vector yêu cầu Oxyz.
     """
 
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
     id: str = Field(default="", description="Định danh duy nhất của vị trí việc làm (ví dụ: 'J1', 'job_dev')")
     job_id: str | None = Field(default=None, description="Định danh vị trí (alias cho id)")
     title: str | None = Field(default=None, description="Tên hoặc chức danh công việc")
@@ -440,7 +460,7 @@ class JobProfileInput(BaseModel):
     min_e_score: float = Field(default=0.0, ge=0.0, description="Ngưỡng sàn điểm E tối thiểu để chấp nhận ứng viên")
     salary_offered: float | None = Field(default=None, description="Mức lương chi trả cho vị trí")
     allowed_disability_groups: list[str] | None = Field(default=None, description="Các nhóm khuyết tật phù hợp với công việc")
-
+    nhom_khuyet_tat_yeu_cau: str | None = Field(default=None, description="Nhóm khuyết tật yêu cầu cho vị trí (nếu có)")
 
 
 class StableMatchingRequest(BaseModel):
@@ -451,6 +471,8 @@ class StableMatchingRequest(BaseModel):
         Nhận danh sách ứng viên, vị trí tuyển dụng, thiết lập cơ chế đề nghị (optimal)
         và các tham số lọc ngưỡng, hậu xử lý Top-K.
     """
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
     candidates: list[CandidateProfileInput] = Field(description="Danh sách hồ sơ các ứng viên tham gia ghép cặp")
     jobs: list[JobProfileInput] = Field(description="Danh sách các vị trí tuyển dụng kèm quota")
@@ -530,6 +552,8 @@ class MatrixMatchingRequest(BaseModel):
         Candidate Preference Scores và Employer Preference Scores cùng Quotas.
     """
 
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
     candidate_scores: dict[str, dict[str, float]] = Field(
         description="Ma trận điểm C: {candidate_id: {job_id: score}} - mức độ yêu thích công việc của ứng viên"
     )
@@ -572,6 +596,8 @@ class CandidateRecommendationResponse(BaseModel):
         Cung cấp các phương án dự phòng khi vị trí chính không thành công (Hậu xử lý Giai đoạn 4).
     """
 
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
+
     candidate_id: str = Field(description="ID ứng viên nhận gợi ý")
     job_id: str = Field(description="ID vị trí công việc được gợi ý")
     position: int = Field(description="Thứ hạng gợi ý (1 là ưu tiên cao nhất)")
@@ -589,6 +615,8 @@ class MatchedPairResponse(BaseModel):
     Mục đích:
         Cung cấp thông tin minh bạch về điểm số hai chiều và thứ hạng của nhau trong danh sách ưu tiên.
     """
+
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 
     candidate_id: str = Field(description="ID ứng viên")
     job_id: str = Field(description="ID vị trí tuyển dụng")
@@ -609,6 +637,8 @@ class StableMatchingMetricsResponse(BaseModel):
         Đánh giá tính ổn định toán học (0% Blocking Pairs), mức độ hài lòng hai phía và tỷ lệ lấp đầy Quota.
     """
 
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
+
     total_candidates: int = Field(description="Tổng số ứng viên tham gia thị trường")
     total_jobs: int = Field(description="Tổng số vị trí tuyển dụng")
     total_quota: int = Field(description="Tổng số chỉ tiêu tuyển dụng của toàn hệ thống")
@@ -628,7 +658,6 @@ class StableMatchingMetricsResponse(BaseModel):
     congestion_rate: float | None = Field(default=None, description="Mức độ xung đột giới thiệu nhiều nơi (Mục 6.5)")
 
 
-
 class StableMatchingResponse(BaseModel):
     """
     Response kết quả hoàn chỉnh của thuật toán Gale-Shapley Stable Matching.
@@ -636,6 +665,8 @@ class StableMatchingResponse(BaseModel):
     Mục đích:
         Đóng gói toàn diện kết quả phân bổ, gợi ý Top-K và báo cáo chỉ số KPIs trả về cho người dùng/API Gateway.
     """
+
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 
     status: str = Field(default="success", description="Trạng thái thực thi ('success')")
     optimal: str = Field(description="Chế độ tối ưu đã thực hiện ('candidate' hoặc 'employer')")
@@ -669,3 +700,23 @@ class StableMatchingResponse(BaseModel):
         description="Danh sách các cảnh báo dữ liệu hoặc nghiệp vụ phát hiện trong quá trình xử lý"
     )
 
+
+# ---------------------------------------------------------------------------
+# PYDANTIC V2 TYPE ADAPTERS CHO XÁC THỰC & TUẦN TỰ HÓA BATCH TỐC ĐỘ CAO
+# ---------------------------------------------------------------------------
+
+CandidateProfileListAdapter: TypeAdapter[list[CandidateProfileInput]] = TypeAdapter(
+    list[CandidateProfileInput]
+)
+JobProfileListAdapter: TypeAdapter[list[JobProfileInput]] = TypeAdapter(
+    list[JobProfileInput]
+)
+MatchedPairListAdapter: TypeAdapter[list[MatchedPairResponse]] = TypeAdapter(
+    list[MatchedPairResponse]
+)
+CandidateRecommendationListAdapter: TypeAdapter[list[CandidateRecommendationResponse]] = (
+    TypeAdapter(list[CandidateRecommendationResponse])
+)
+StableMatchingResponseAdapter: TypeAdapter[StableMatchingResponse] = TypeAdapter(
+    StableMatchingResponse
+)

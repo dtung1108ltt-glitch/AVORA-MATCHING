@@ -3,30 +3,24 @@
 """
 generate_mock_candidates.py
 
-Tạo dữ liệu ứng viên giả phục vụ AVORA Matching.
+Tạo dữ liệu ứng viên giả phục vụ AVORA Matching sử dụng Polars.
 Database đầu ra chỉ gồm đúng 2 cột:
 - Họ và tên
 - Nhóm khuyết tật
 
-Workflow:
-    POST /match
-        -> tìm nhóm khuyết tật phù hợp từ job_descriptions
-        -> lọc candidates.csv theo cột "Nhóm khuyết tật"
-        -> trả danh sách ứng viên thuộc nhóm tương ứng
-
-Dữ liệu được tạo hoàn toàn giả lập, không đại diện cho người thật.
 Output mặc định: scripts/data/candidates.csv
 """
 
 from __future__ import annotations
 
 import argparse
-import csv
 import random
 import sys
 import unicodedata
 from collections import Counter
 from pathlib import Path
+
+import polars as pl
 
 DEFAULT_COUNT = 3000
 DEFAULT_SEED = 42
@@ -79,10 +73,7 @@ def build_name_pool() -> list[str]:
 
 
 def allocate_group_counts(total: int) -> dict[str, int]:
-    """
-    Chia ứng viên gần đều cho tất cả nhóm.
-    Phần dư được phân lần lượt từ nhóm đầu tiên.
-    """
+    """Chia ứng viên gần đều cho tất cả nhóm."""
     base, remainder = divmod(total, len(DISABILITY_GROUPS))
     return {
         group: base + (1 if index < remainder else 0)
@@ -149,15 +140,10 @@ def validate_candidates(rows: list[dict[str, str]], expected_count: int) -> None
 
 
 def write_csv(path: Path, rows: list[dict[str, str]]) -> None:
-    """Ghi CSV UTF-8 BOM để mở đúng tiếng Việt trong Excel."""
+    """Ghi CSV UTF-8 BOM bằng Polars write_csv để mở đúng tiếng Việt trong Excel."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="", encoding="utf-8-sig") as file:
-        writer = csv.DictWriter(
-            file,
-            fieldnames=["Họ và tên", "Nhóm khuyết tật"],
-        )
-        writer.writeheader()
-        writer.writerows(rows)
+    df = pl.DataFrame(rows, schema=["Họ và tên", "Nhóm khuyết tật"])
+    df.write_csv(path, include_bom=True)
 
 
 def parse_args() -> argparse.Namespace:

@@ -5,12 +5,12 @@ from collections import defaultdict
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, ORJSONResponse
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
-# Thử import get_db và init_db từ app.database, xử lý an toàn nếu thiếu driver psycopg2 ở môi trường dev local
+# Thử import get_db và init_db từ app.database, xử lý an toàn nếu thiếu driver ở môi trường dev local
 try:
     from app.database import get_db, init_db
 except (ImportError, Exception):  # pragma: no cover
@@ -30,7 +30,7 @@ try:
     from app.embeddings import get_embedding
 except (ImportError, Exception):  # pragma: no cover
     def get_embedding(text: str) -> list[float]:
-        """Fallback embedding giả lập khi thiếu thư viện sentence-transformers."""
+        """Fallback embedding giả lập khi thiếu thư viện embedding."""
         return [0.0] * 1024
 
 try:
@@ -69,10 +69,12 @@ from app.matching import (
 )
 
 
-# Khởi tạo ứng dụng FastAPI với tài liệu OpenAPI chi tiết
+# Khởi tạo ứng dụng FastAPI với default_response_class=ORJSONResponse
+# Hỗ trợ tuần tự hóa trực tiếp các đối tượng dữ liệu và mảng numpy.ndarray tốc độ cao
 app = FastAPI(
     title="Avora Matching API - Two-Sided Stable Matching Platform",
-    version="2.1.0",
+    version="2.2.0",
+    default_response_class=ORJSONResponse,
     description=(
         "Nền tảng API tối ưu hóa thị trường kết nối tuyển dụng hai phía (Two-Sided Matching Market) "
         "tích hợp thuật toán Ghép cặp Ổn định Gale-Shapley (Deferred Acceptance Many-to-One), "
@@ -80,14 +82,16 @@ app = FastAPI(
         "và hệ thống khuyến nghị việc làm dự phòng Top-K Recommendations."
     ),
 )
- 
+
+
 @app.exception_handler(ValueError)
-async def value_error_exception_handler(request: Request, exc: ValueError) -> JSONResponse:
+async def value_error_exception_handler(request: Request, exc: ValueError) -> ORJSONResponse:
     """Xử lý ngoại lệ ValueError (validation nghiệp vụ) và trả về HTTP 422."""
-    return JSONResponse(
+    return ORJSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
         content={"detail": str(exc)},
     )
+
 
 # Biên độ điểm dung sai để chọn nhóm khuyết tật gần nhóm tốt nhất
 GROUP_SCORE_MARGIN = 0.03
@@ -106,8 +110,8 @@ def on_startup() -> None:
     Sự kiện vòng đời khởi động của ứng dụng FastAPI.
 
     Mục đích:
-        Khởi tạo kết nối cơ sở dữ liệu, kích hoạt extension pgvector và
-        tạo lập các bảng ORM chưa tồn tại trong cơ sở dữ liệu.
+        Khởi tạo kết nối cơ sở dữ liệu, kích hoạt extension pgvector / Qdrant Payload Indexes
+        và tạo lập các bảng ORM chưa tồn tại trong cơ sở dữ liệu.
 
     Tham số đầu vào:
         Không có.
@@ -133,7 +137,6 @@ def root() -> dict[str, str]:
     Kết quả trả về:
         dict[str, str]: Dictionary chứa tên dịch vụ, trạng thái 'running', phiên bản và liên kết docs.
     """
-    # Trả về thông tin meta của hệ thống AVORA Matching
     return {
         "service": "Avora Two-Sided Stable Matching API",
         "status": "running",
@@ -278,23 +281,19 @@ def list_job_descriptions(
     Kết quả trả về:
         list[JobDescriptionResponse]: Danh sách các bản ghi mô tả công việc thỏa mãn điều kiện.
     """
-    # Khởi tạo truy vấn trên bảng JobDescription
     query = db.query(JobDescription)
 
-    # Áp dụng bộ lọc nhóm khuyết tật nếu người dùng truyền tham số
     if nhom_khuyet_tat:
         query = query.filter(
             JobDescription.nhom_khuyet_tat == nhom_khuyet_tat.strip()
         )
 
-    # Phân trang và sắp xếp tăng dần theo ID
     records = (
         query.order_by(JobDescription.id)
         .offset(skip)
         .limit(limit)
         .all()
     )
-    # Chuyển đổi các bản ghi ORM thành Pydantic response model
     return [JobDescriptionResponse.model_validate(record) for record in records]
 
 
@@ -324,14 +323,12 @@ def create_candidate(
     Raises:
         HTTPException: 409 nếu trùng lặp/xung đột, 500 nếu lỗi kết nối database.
     """
-    # Khởi tạo bản ghi ứng viên mới
     record = Candidate(
         ho_ten=payload.ho_ten,
         nhom_khuyet_tat=payload.nhom_khuyet_tat,
     )
 
     try:
-        # Ghi vào database và commit transaction
         db.add(record)
         db.commit()
         db.refresh(record)
@@ -415,24 +412,19 @@ def aggregate_group_scores(
         list[tuple[str, float]]: Danh sách các cặp (tên nhóm khuyết tật, điểm tổng hợp)
                                  được sắp xếp theo điểm số giảm dần.
     """
-    # Gom nhóm điểm tương đồng theo tên nhóm khuyết tật
     scores_by_group: dict[str, list[float]] = defaultdict(list)
 
     for description, similarity in rows:
         scores_by_group[description.nhom_khuyet_tat].append(float(similarity))
 
     aggregated: list[tuple[str, float]] = []
-    # Duyệt từng nhóm và tính điểm kết hợp
     for group, scores in scores_by_group.items():
-        # Lấy tối đa 3 điểm tương đồng cao nhất của nhóm
         top_scores = sorted(scores, reverse=True)[:3]
         maximum = top_scores[0]
         average = sum(top_scores) / len(top_scores)
-        # Tính điểm đại diện có trọng số
         group_score = 0.6 * maximum + 0.4 * average
         aggregated.append((group, group_score))
 
-    # Sắp xếp các nhóm theo điểm tổng hợp giảm dần
     aggregated.sort(key=lambda item: item[1], reverse=True)
     return aggregated
 
@@ -450,15 +442,7 @@ def match_candidates(
     4. Tổng hợp điểm phù hợp cho từng nhóm khuyết tật.
     5. Chọn lọc các nhóm đạt ngưỡng và tiệm cận nhóm tốt nhất.
     6. Lọc danh sách ứng viên thuộc các nhóm được chọn.
-
-    Tham số đầu vào:
-        payload (MatchQuery): Chứa query mô tả công việc và các giới hạn top_k.
-        db (Session): SQLAlchemy Database Session.
-
-    Kết quả trả về:
-        MatchResponse: Chứa các nhóm phù hợp, mô tả đối chiếu và danh sách ứng viên.
     """
-    # Kiểm tra xem kho mô tả công việc đã có dữ liệu hay chưa
     description_count = db.query(func.count(JobDescription.id)).scalar() or 0
     if description_count == 0:
         raise HTTPException(
@@ -469,7 +453,6 @@ def match_candidates(
             ),
         )
 
-    # Sinh vector embedding cho câu truy vấn
     try:
         query_vector = get_embedding(payload.query)
     except Exception as exc:
@@ -478,7 +461,6 @@ def match_candidates(
             detail=f"Không thể tạo query embedding: {type(exc).__name__}",
         ) from exc
 
-    # Tính cosine distance trực tiếp trên PostgreSQL pgvector
     cosine_distance = JobDescription.embedding.cosine_distance(query_vector)
 
     try:
@@ -509,11 +491,9 @@ def match_candidates(
         for description, similarity in raw_rows
     ]
 
-    # Tổng hợp điểm theo từng nhóm khuyết tật
     ranked_groups = aggregate_group_scores(rows)
     best_score = ranked_groups[0][1]
 
-    # Lọc các nhóm thỏa mãn ngưỡng sàn và nằm trong khoảng dung sai margin
     selected_groups = [
         (group, score)
         for group, score in ranked_groups
@@ -521,7 +501,6 @@ def match_candidates(
         and best_score - score <= GROUP_SCORE_MARGIN
     ]
 
-    # Nếu không có nhóm nào vượt qua ngưỡng chất lượng
     if not selected_groups:
         return MatchResponse(
             matched_groups=[],
@@ -539,7 +518,6 @@ def match_candidates(
 
     selected_group_names = [group for group, _ in selected_groups]
 
-    # Truy vấn ứng viên thuộc các nhóm đã được chọn
     candidate_records = (
         db.query(Candidate)
         .filter(Candidate.nhom_khuyet_tat.in_(selected_group_names))
@@ -587,34 +565,7 @@ def stable_matching_endpoint(
 ) -> StableMatchingResponse:
     """
     Endpoint thực thi quy trình Ghép cặp Ổn định (Gale-Shapley Many-to-One Deferred Acceptance) toàn diện.
-
-    Mục đích:
-        Phân bổ tối ưu thị trường kết nối tuyển dụng hai phía giữa Ứng viên (Candidates)
-        và Vị trí việc làm (Jobs) với các tính năng nâng cao:
-        - Tính Điểm E (Employer Score) từ tọa độ vector không gian Oxyz (Cosine Similarity).
-        - Tính Điểm C (Candidate Score) từ nguyện vọng và mức độ yêu thích.
-        - Xử lý hạn mức tuyển dụng Quotas q_j (Many-to-One).
-        - Bộ lọc điều kiện tiên quyết Hard Constraints (Domain Filter D).
-        - Cơ chế phá hòa tất định Deterministic Tie-Breaking.
-        - Hậu xử lý Top-K Recommendations dự phòng (Normalized Surplus Score).
-        - Báo cáo định lượng các chỉ số KPIs (100% Stability - 0% Blocking Pairs, Satisfaction, Fill Rate).
-
-    Tham số đầu vào:
-        request (StableMatchingRequest): Payload đầu vào chứa danh sách ứng viên (kèm tọa độ Oxyz/điểm C),
-                                        danh sách việc làm (kèm quota/tọa độ Oxyz), chế độ 'optimal' ('candidate' hoặc 'employer'),
-                                        các ngưỡng điểm sàn và tham số top_k.
-
-    Kết quả trả về:
-        StableMatchingResponse: Kết quả phân bổ chi tiết gồm:
-            - matches: Ánh xạ {candidate_id: job_id}.
-            - matched_pairs: Chi tiết từng cặp trúng tuyển kèm thứ hạng và điểm số hai chiều.
-            - job_assignments: Danh sách trúng tuyển theo từng vị trí việc làm.
-            - unmatched_candidates: Danh sách ứng viên chưa được phân bổ.
-            - unmatched_jobs: Danh sách vị trí còn trống chỉ tiêu.
-            - recommendations: Danh sách Top-K công việc gợi ý dự phòng cho mỗi ứng viên.
-            - metrics: Báo cáo chỉ số KPIs hoàn chỉnh (Blocking Pairs = 0, Fill Rate, Satisfaction).
     """
-    # Gọi hàm điều phối toàn trình trong module matching
     try:
         return run_stable_matching(request)
     except ValueError as exc:
@@ -622,7 +573,6 @@ def stable_matching_endpoint(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=str(exc),
         )
-
 
 
 @app.post(
@@ -635,25 +585,8 @@ def matrix_matching_endpoint(
     request: MatrixMatchingRequest,
 ) -> StableMatchingResponse:
     """
-    Endpoint thực thi Gale-Shapley trực tiếp từ Ma trận điểm số C và E (theo mục 7 trong Báo cáo phân tích).
-
-    Mục đích:
-        Phục vụ các hệ thống đã tính sẵn ma trận điểm sở thích của Ứng viên (Điểm C)
-        và ma trận điểm phù hợp của Nhà tuyển dụng (Điểm E), cùng chỉ tiêu tuyển dụng Quotas.
-
-    Tham số đầu vào:
-        request (MatrixMatchingRequest): Payload chứa:
-            - candidate_scores: {candidate_id: {job_id: score}} - Điểm C.
-            - employer_scores: {job_id: {candidate_id: score}} - Điểm E.
-            - job_quotas: {job_id: quota} - Hạn mức tuyển dụng.
-            - optimal: Chế độ phía đề nghị ('candidate' hoặc 'employer').
-            - top_k: Số lượng vị trí gợi ý Top-K dự phòng.
-            - tie_break_seed: Hạt giống phá hòa tất định.
-
-    Kết quả trả về:
-        StableMatchingResponse: Kết quả phân bổ trúng tuyển, danh sách gợi ý dự phòng và chỉ số đo lường hiệu quả.
+    Endpoint thực thi Gale-Shapley trực tiếp từ Ma trận điểm số C và E.
     """
-    # Gọi hàm xử lý ma trận trực tiếp trong module matching
     return run_matrix_matching(request)
 
 
@@ -672,30 +605,7 @@ def database_stable_matching_endpoint(
 ) -> StableMatchingResponse:
     """
     Endpoint trích xuất dữ liệu Candidates và Job Descriptions từ Database để chạy thuật toán Gale-Shapley.
-
-    Mục đích:
-        Kết nối cơ sở dữ liệu PostgreSQL thực tế với Thuật toán Gale-Shapley Many-to-One.
-        Hệ thống tự động:
-        1. Lấy danh sách ứng viên và công việc từ DB.
-        2. Sinh ma trận điểm tương đồng dựa trên nhóm khuyết tật và độ tương quan nội dung.
-        3. Áp dụng bộ lọc Hard Constraints.
-        4. Chạy Candidate-Proposing Deferred Acceptance để tìm kết quả phân bổ ổn định.
-        5. Sinh danh sách gợi ý Top-K và tính toán các chỉ số KPIs.
-
-    Tham số đầu vào:
-        job_ids (list[int] | None): Bộ lọc danh sách ID công việc (tùy chọn).
-        top_k (int): Số lượng việc làm gợi ý dự phòng cho mỗi ứng viên.
-        optimal (str): Phía chủ động gửi đề nghị ('candidate' hoặc 'employer').
-        quota_per_job (int): Hạn mức tuyển dụng mặc định cho mỗi vị trí công việc.
-        db (Session): SQLAlchemy Database Session.
-
-    Kết quả trả về:
-        StableMatchingResponse: Kết quả phân bổ ổn định và báo cáo hiệu quả KPIs trên dữ liệu DB thật.
-
-    Raises:
-        HTTPException: 404 nếu cơ sở dữ liệu không có dữ liệu ứng viên hoặc công việc.
     """
-    # Lấy danh sách công việc từ database
     job_query = db.query(JobDescription)
     if job_ids:
         job_query = job_query.filter(JobDescription.id.in_(job_ids))
@@ -707,7 +617,6 @@ def database_stable_matching_endpoint(
             detail="Không tìm thấy mô tả công việc nào trong database để thực hiện matching.",
         )
 
-    # Lấy danh sách ứng viên từ database
     candidates = db.query(Candidate).all()
     if not candidates:
         raise HTTPException(
@@ -715,7 +624,6 @@ def database_stable_matching_endpoint(
             detail="Không tìm thấy ứng viên nào trong database để thực hiện matching.",
         )
 
-    # Khởi tạo danh sách JobProfileInput
     job_profiles: list[JobProfileInput] = []
     for job in jobs:
         job_profiles.append(
@@ -727,10 +635,8 @@ def database_stable_matching_endpoint(
             )
         )
 
-    # Khởi tạo danh sách CandidateProfileInput và ma trận điểm
     candidate_profiles: list[CandidateProfileInput] = []
     for cand in candidates:
-        # Tính điểm ưu tiên: nếu cùng nhóm khuyết tật thì đạt điểm cao (0.85 - 0.95), nếu khác nhóm thì điểm thấp (0.1 - 0.3)
         c_scores: dict[str, float] = {}
         for job in jobs:
             j_key = f"job_{job.id}"
@@ -748,7 +654,6 @@ def database_stable_matching_endpoint(
             )
         )
 
-    # Đóng gói thành StableMatchingRequest
     request = StableMatchingRequest(
         candidates=candidate_profiles,
         jobs=job_profiles,
@@ -758,5 +663,4 @@ def database_stable_matching_endpoint(
         top_k=top_k,
     )
 
-    # Thực thi thuật toán Stable Matching
     return run_stable_matching(request)

@@ -16,12 +16,12 @@ class JobDescription(Base):
 
     Workflow:
         mo_ta_cong_viec
-            -> Qwen embedding với is_query=False
+            -> ONNX Runtime / FastEmbed embedding với is_query=False
             -> lưu vào embedding
 
     Khi tìm kiếm:
         query
-            -> Qwen embedding với is_query=True
+            -> ONNX Runtime / FastEmbed embedding với is_query=True
             -> cosine similarity với JobDescription.embedding
             -> lấy nhom_khuyet_tat của kết quả phù hợp
             -> lọc bảng candidates theo nhóm đó

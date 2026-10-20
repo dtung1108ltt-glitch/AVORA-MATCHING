@@ -35,7 +35,7 @@ __all__ = [
 ]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Recommendation:
     """Một gợi ý việc làm cho ứng viên.
 
@@ -56,7 +56,6 @@ class Recommendation:
     is_primary: bool = False
     explanation: str = ""
     breakdown: dict[str, float] = field(default_factory=dict)
-
 
 
 def normalized_surplus_scores(
@@ -213,7 +212,6 @@ def generate_top_k(
                     breakdown=bk_data,
                 )
             )
-
 
         recommendations[candidate] = items[:k]
 
